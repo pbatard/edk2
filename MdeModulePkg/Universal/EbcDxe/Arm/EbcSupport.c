@@ -2,6 +2,7 @@
   This module contains EBC support routines that are customized based on
   the target Arm processor.
 
+Copyright (c) 2016, Pete Batard. All rights reserved.<BR>
 Copyright (c) 2016, Linaro, Ltd. All rights reserved.<BR>
 Copyright (c) 2015, The Linux Foundation. All rights reserved.<BR>
 Copyright (c) 2006 - 2014, Intel Corporation. All rights reserved.<BR>
@@ -23,6 +24,10 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 // Amount of space that is not used in the stack
 //
 #define STACK_REMAIN_SIZE (1024 * 4)
+//
+// Amount of space to be used by the stack argument tracker
+// Less than 2 bits are needed for every 32 bits of stack data -> 1/32th.
+#define STACK_TRACKER_SIZE (STACK_POOL_SIZE / 32)
 
 #pragma pack(1)
 typedef struct {
@@ -34,6 +39,39 @@ typedef struct {
 #pragma pack()
 
 extern CONST EBC_INSTRUCTION_BUFFER       mEbcInstructionBufferTemplate;
+
+//
+// TODO: remove those
+//
+VOID WaitForKey(VOID)
+{
+	UINTN Event;
+	gST->ConIn->Reset(gST->ConIn, FALSE);
+	gST->BootServices->WaitForEvent(1, &gST->ConIn->WaitForKey, &Event);
+}
+
+VOID PrintStr(CHAR16* Str)
+{
+	gST->ConOut->OutputString(gST->ConOut, Str);
+}
+
+VOID PrintHex(CHAR16* Str, UINT32 val)
+{
+	CHAR16 a[] = L"0123456789ABCDEF";
+	CHAR16 r[] = L"0x12345678\r\n";
+	INTN i, d;
+	UINT32 n = val, m = 0x0FFFFFFF;
+
+	for (i = 0; i < 8; i++) {
+		d = n >> (4 * (7 - i));
+		r[i + 2] = a[d];
+		n &= m;
+		m >>= 4;
+	}
+
+	PrintStr(Str);
+	PrintStr(r);
+}
 
 /**
   Begin executing an EBC image.
@@ -82,6 +120,262 @@ PushU32 (
   *(UINT32 *)(UINTN)VmPtr->Gpr[0] = Arg;
 }
 
+/**
+  Returns the current stack tracker index entry.
+
+  @param VmPtr  The pointer to current VM context.
+
+  @return  The decoded stack tracker index [0x00, 0x08].
+
+**/
+UINT8
+GetStackTrackerIndex (
+  IN VM_CONTEXT *VmPtr
+)
+{
+  UINT8 Index, IndexPrev;
+
+  if (VmPtr->StackTrackerIndex < 0)
+    return 0x00;
+
+  Index = VmPtr->StackTracker[(VmPtr->StackTrackerIndex - 1) / 4];
+  Index >>= 6 - (2 * ((VmPtr->StackTrackerIndex - 1) % 4));
+  Index &= 0x03;
+
+  // Decoding operates as follows:
+  // 00b                        -> 0000b
+  // 01b                        -> 1000b
+  // 1Xb preceded by YZb        -> 0XYZb
+  // (e.g. 11b preceded by 10b  -> 0110b)
+  //
+  // Note that, in accordance with the UEFI specs, when CALLEX to native is
+  // invoked, then the *ONLY* valid values allowed for the stacked function 
+  // parameters are 0000b (for a 64 bit parameter) or 1000b (native length,
+  // which is used for standard native, or any argument that is 32-bit or
+  // smaller).
+  // Therefore any encouter with 0001b to 0111b as part of CALLEX argument
+  // processing must be rejected as unsupported code, as it signifies a
+  // programming error in the EBC application.
+  // 
+  if (Index == 0x01) {
+    Index = 0x08;
+  } else if (Index & 0x02) {
+    IndexPrev = VmPtr->StackTracker[(VmPtr->StackTrackerIndex - 2) / 4];
+    IndexPrev >>= 6 - (2 * ((VmPtr->StackTrackerIndex - 2) % 4));
+    Index = ((Index << 2) & 0x04) | (IndexPrev & 0x03);
+  }
+
+//  PrintHex(L"Get: ", Index);
+//  WaitForKey();
+  return Index;
+}
+
+/**
+  Add a new stack tracker index entry.
+
+  @param VmPtr  The pointer to current VM context.
+  @param Value  The value to be encoded.
+
+  @retval EFI_OUT_OF_RESOURCES  The stack tracker is being overflown.
+  @retval EFI_SUCCESS           The index was added successfully.
+
+    byte 0   byte 1    byte 3
+  [0|1|2|3] [4|5|6|7] [8|9|...]
+**/
+EFI_STATUS
+AddStackTrackerIndex (
+  IN VM_CONTEXT *VmPtr,
+  IN UINT8 Index
+)
+{
+  UINT8 i, Data;
+
+//  PrintHex(L"Add: ", Index);
+  // Valid values are [0x00, 0x08], which get encoded as:
+  // 0000b -> 00b      (single 2-bit sequence)
+  // 0001b -> 01b 10b  (dual 2-bit sequence)
+  // 0010b -> 10b 10b  (dual 2-bit sequence)
+  // 0011b -> 11b 10b  (dual 2-bit sequence)
+  // 0100b -> 00b 11b  (dual 2-bit sequence)
+  // 0101b -> 01b 11b  (dual 2-bit sequence)
+  // 0110b -> 10b 11b  (dual 2-bit sequence)
+  // 0111b -> 11b 11b  (dual 2-bit sequence)
+  // 1000b -> 01b      (single 2-bit sequence)
+  ASSERT(Index <= 0x08);
+  if (Index == 0x08)
+    Data = 0x01;
+  else
+    Data = Index & 0x03;
+
+  for (i = 0; i < 2; i++) {
+    // Make sure we don't overflow our buffer
+    if (VmPtr->StackTrackerIndex / 4 > STACK_TRACKER_SIZE) {
+PrintStr(L"AddStackTrackerIndex - overflow\r\n");
+      return EFI_OUT_OF_RESOURCES;
+    }
+    // Ensure that we clear bits we don't use yet
+    VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4] &= 0xFC << (6 - 2 * (VmPtr->StackTrackerIndex % 4));
+    VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4] |= Data << (6 - 2 * (VmPtr->StackTrackerIndex % 4));
+    VmPtr->StackTrackerIndex++;
+    if ((Index >= 0x01) && (Index <= 0x07)) {
+      // Append the extra 2 bit value
+      Data = (Index >> 2) | 0x02;
+    } else {
+      // 2-bit encoding was enough
+      break;
+    }
+  }
+  return EFI_SUCCESS;
+}
+
+/**
+  Delete an existing stack tracker index entry.
+
+  @param VmPtr  The pointer to current VM context.
+
+  @retval EFI_OUT_OF_RESOURCES  The stack tracker is being underflown.
+  @retval EFI_SUCCESS           The index was added successfully.
+**/
+EFI_STATUS
+DelStackTrackerIndex (
+  IN VM_CONTEXT *VmPtr
+)
+{
+  UINT8 Index;
+
+  // We don't care about clearing the used bits, just update the index
+  VmPtr->StackTrackerIndex--;
+  Index = VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4];
+  Index >>= 6 - (2 * (VmPtr->StackTrackerIndex % 4));
+//PrintHex(L"Del: ", Index);
+  if (Index & 0x02) // dual sequence
+    VmPtr->StackTrackerIndex--;
+  if (VmPtr->StackTrackerIndex < 0) {
+PrintStr(L"DelStackTrackerIndex - underflow\r\n");
+    return EFI_OUT_OF_RESOURCES;
+   }
+  return EFI_SUCCESS;
+}
+
+/**
+  Update the stack tracker according to the latest natural and constant
+  value stack manipulation operations.
+
+  @param VmPtr         The pointer to current VM context.
+  @param NaturalUnits  The number of natural values that were pushed (>0) or
+                       popped (<0).
+  @param ConstUnits    The number of const bytes that were pushed (>0) or
+                       popped (<0).
+
+  @retval EFI_UNSUPPORTED       The VM is trying to update the stack in a
+                                manner that breaks stack tracking.
+  @retval EFI_OUT_OF_RESOURCES  The stack tracker is being overflown.
+  @retval EFI_SUCCESS           The stack tracker was updated successfully.
+
+**/
+EFI_STATUS
+UpdateStackTracker (
+  IN VM_CONTEXT *VmPtr,
+  IN INT64 NaturalUnits,
+  IN INT64 ConstUnits
+)
+{
+  EFI_STATUS Status;
+  UINT8 LastIndex;
+  INT64 i;
+//  PrintHex(L"Update Nat: ", (INT32)NaturalUnits);
+//  PrintHex(L"Update Cst: ", (INT32)ConstUnits);
+
+  // If we have both natural and constant negative values, we can't guess the
+  // order so return an error. Note that this is not an issue for negative,
+  // values, as we can match the depletion order from our tracker.
+  if ((NaturalUnits < 0) && (ConstUnits < 0)) {
+PrintStr(L"UpdateStackTracker: (NaturalUnits < 0) && (ConstUnits < 0)\r\n");
+    return EFI_UNSUPPORTED;
+  }
+
+  if ((NaturalUnits == 0) && (ConstUnits == 0))
+    // Nothing to do
+    return EFI_SUCCESS;
+
+  // Mismatched signage should already have been filtered out, but test for it
+  // just in case.
+  if ( ((NaturalUnits > 0) && (ConstUnits < 0)) || ((NaturalUnits < 0) && (ConstUnits > 0)) ) {
+PrintStr(L"UpdateStackTracker: Sign mismatch\r\n");
+    return EFI_UNSUPPORTED;
+  }
+
+  if (NaturalUnits < 0) {
+    // Add natural indexes (100b) into our stack tracker
+    // Note, we don't care if the previous entry was aligned here
+    for (i = 0; i > NaturalUnits; i--) {
+      Status = AddStackTrackerIndex(VmPtr, 0x08);
+      if (Status != EFI_SUCCESS)
+        return Status;
+    }
+  } else if (ConstUnits < 0) {
+//PrintStr(L"ConstUnits < 0\r\n");
+    // Add constant indexes (000b-111b) to our stack tracker
+    // For constants, we do care if the previous entry was aligned to 64 bit
+    // since we need to include any existing non aligned indexes into the new
+    // set of (constant) indexes we are adding. Thus, if the last index is
+    // non zero (non 64-bit aligned) we just delete it and add the value to
+    // our constant.
+    LastIndex = GetStackTrackerIndex(VmPtr);
+    if ((LastIndex != 0x00) && (LastIndex != 0x08)) {
+      DelStackTrackerIndex(VmPtr);
+      ConstUnits -= LastIndex;
+    }
+    // Now, add as many 64 bit indexes as we can (0x00 values)
+    for (i = -8; i >= ConstUnits; i -= 8) {
+      Status = AddStackTrackerIndex(VmPtr, 0x00);
+      if (Status != EFI_SUCCESS)
+        return Status;
+    }
+    // Add any remaining misaligned bytes
+    if (ConstUnits % 8) {
+      Status = AddStackTrackerIndex(VmPtr, (-ConstUnits) % 8);
+      if (Status != EFI_SUCCESS)
+        return Status;
+    }
+  } else {
+//PrintStr(L"Pos Vals\r\n");
+    // Positive values => remove items from the stack tracker
+    while ((NaturalUnits > 0) || (ConstUnits > 0)) {
+      LastIndex = GetStackTrackerIndex(VmPtr);
+      Status = DelStackTrackerIndex(VmPtr);
+      if (Status != EFI_SUCCESS)
+        return Status;
+      if (LastIndex == 0x08) {
+        // Remove a natural
+        if (NaturalUnits <= 0) {
+          // Got a natural while expecting const => EBC code unbalanced stack
+PrintStr(L"UpdateStackTracker: Unbalanced const ops\r\n");
+          return EFI_UNSUPPORTED;
+        }
+        NaturalUnits--;
+      } else {
+        // Remove a set of const bytes
+        if (LastIndex == 0x00)
+          LastIndex = 0x08;
+        if (ConstUnits <= 0) {
+          // Got a const while expecting natural => EBC code unbalanced stack
+PrintStr(L"UpdateStackTracker: Unbalanced natural ops\r\n");
+          return EFI_UNSUPPORTED;
+        } else if (ConstUnits >= LastIndex) {
+          ConstUnits -= LastIndex;
+        } else { // We have a remainder - add it back
+          Status = AddStackTrackerIndex(VmPtr, LastIndex - ConstUnits);
+          if (Status != EFI_SUCCESS)
+            return Status;
+          ConstUnits = 0;
+        }
+      }
+    }
+  }
+
+  return EFI_SUCCESS;
+}
 
 /**
   Begin executing an EBC image.
@@ -110,6 +404,12 @@ EbcInterpret (
   IN UINTN      Args5_16[]
   )
 {
+  //
+  // Sanity checks for the stack tracker
+  //
+  ASSERT(sizeof(UINT64) == 8);
+  ASSERT(sizeof(UINT32) == 4);
+
   //
   // Create a new VM context on the stack
   //
@@ -146,8 +446,12 @@ EbcInterpret (
   if (EFI_ERROR(Status)) {
     return Status;
   }
-  VmContext.StackTop = (UINT8*)VmContext.StackPool + (STACK_REMAIN_SIZE);
-  VmContext.Gpr[0] = (UINT32) ((UINT8*)VmContext.StackPool + STACK_POOL_SIZE);
+
+  // Reserve space at the bottom of the allocated stack for the stack argument tracker
+  VmContext.StackTracker = (UINT8*)VmContext.StackPool;
+  VmContext.StackTrackerIndex = 0;
+  VmContext.StackTop = (UINT8*)VmContext.StackPool + STACK_REMAIN_SIZE + STACK_TRACKER_SIZE;
+  VmContext.Gpr[0] = (UINT32) ((UINT8*)VmContext.StackPool + STACK_POOL_SIZE - STACK_TRACKER_SIZE);
   VmContext.HighStackBottom = (UINTN) VmContext.Gpr[0];
   VmContext.Gpr[0] -= sizeof (UINTN);
 
@@ -249,6 +553,12 @@ ExecuteEbcImageEntryPoint (
   )
 {
   //
+  // Sanity checks for the stack tracker
+  //
+  ASSERT(sizeof(UINT64) == 8);
+  ASSERT(sizeof(UINT32) == 4);
+
+  //
   // Create a new VM context on the stack
   //
   VM_CONTEXT  VmContext;
@@ -289,8 +599,11 @@ ExecuteEbcImageEntryPoint (
   if (EFI_ERROR(Status)) {
     return Status;
   }
-  VmContext.StackTop = (UINT8*)VmContext.StackPool + (STACK_REMAIN_SIZE);
-  VmContext.Gpr[0] = (UINT64)(UINTN) ((UINT8*)VmContext.StackPool + STACK_POOL_SIZE);
+  // Reserve space at the bottom of the allocated stack for the stack argument tracker
+  VmContext.StackTracker = (UINT8*)VmContext.StackPool;
+  VmContext.StackTrackerIndex = 0;
+  VmContext.StackTop = (UINT8*)VmContext.StackPool + STACK_REMAIN_SIZE + STACK_TRACKER_SIZE;
+  VmContext.Gpr[0] = (UINT32)((UINT8*)VmContext.StackPool + STACK_POOL_SIZE - STACK_TRACKER_SIZE);
   VmContext.HighStackBottom = (UINTN)VmContext.Gpr[0];
   VmContext.Gpr[0] -= sizeof (UINTN);
 
@@ -425,6 +738,9 @@ EbcLLCALLEX (
   )
 {
   CONST EBC_INSTRUCTION_BUFFER *InstructionBuffer;
+  UINT32 BackupData, *ArgPtr = (UINT32*) NewStackPointer;
+  UINT8 ArgLayout;
+  INTN i, Padding = 0;
 
   //
   // Processor specific code to check whether the callee is a thunk to EBC.
@@ -450,13 +766,97 @@ EbcLLCALLEX (
     // The callee is not a thunk to EBC, call native code,
     // and get return value.
     //
+    // Now, one major issue we have on Arm32 is that, if a mix of natural and
+    // 64-bit arguments are stacked as parameters for a native call, we risk
+    // running afoul of the AAPCS (the ARM calling convention) which mandates
+    // that the first 2 to 4 arguments are passed as register, and that any
+    // 64-bit argument *MUST* start on r0 or r2.
+    //
+    // So if, say, we have a natural parameter (32-bit) in Arg0 and a 64-bit
+    // parameter in Arg1, then we must pad the first parameter to 64 bit, so
+    // that Arg1 start at register r2.
+    //
+    // This is where our stack tracker comes into play, which tracks EBC stack
+    // manipulations and allows us to find whether each of the (potential)
+    // arguments being passed to a native CALLEX is 64-bit or a natural (since
+    // are the ONLY two types of arguments that can be passed to a native
+    // call, as per the UEFI/EBC specs).
+    //
+    // Using the stack tarcker, we can retreive the last 4 argument types
+    // (encode as 2 bit sequences), which we convert to a 4-bit value (with 
+    // each bit set for natural, cleared for 64-bit) that provides us with
+    // an argument layout we can use to determine where padding is needed.
+    //
+    ArgLayout = 0;
+    for (i = VmPtr->StackTrackerIndex - 4; i <= (VmPtr->StackTrackerIndex - 1); i++) {
+      ArgLayout <<= 1;
+      if ((i / 4) < 0) // We may attempt to read before the stack, which is ok
+        continue;
+      // NB: There's little point in trying to detect dual 2-bit sequences
+      // here (used for stack tracked values that aren't natural or 64-bit)
+      // even if they could be used to detect the end of function parameters.
+      // Since those can't apply to actual function parameters (unless the
+      // EBC code is in breach of the specs), it won't matter if we attempt
+      // to process them.
+      if (VmPtr->StackTracker[i / 4] & (1 << (2 * (3 - (i % 4)))))
+        ArgLayout |= 1;
+    }
+
+	// TODO: validate each sequence
+    // At this stage, ArgLayout is one of the following
+    // Arg# =  3  2  1  0
+    // 0000b (64/64/64/64) -> ok
+    // 0001b (64/64/64/Nl) -> padding needed for arg0 @ dword #0
+    // 0010b (64/64/Nl/64) -> padding needed for arg1 @ dword #2
+    // 0011b (64/64/Nl/Nl) -> ok
+    // 0100b (64/Nl/64/64) -> ok
+    // 0101b (64/Nl/64/Nl) -> padding needed for arg0 @ dword #0
+    // 0110b (64/Nl/Nl/64) -> ok
+    // 0111b (64/Nl/Nl/Nl) -> padding needed for arg2 @ dword #2 (yes, #2)
+    // 1000b (Nl/64/64/64) -> ok
+    // 1001b (Nl/64/64/Nl) -> padding needed for arg0 @ dword #0
+    // 1010b (Nl/64/Nl/64) -> padding needed for arg1 @ dword #2
+    // 1011b (Nl/64/Nl/Nl) -> ok
+    // 1100b (Nl/Nl/64/64) -> ok
+    // 1101b (Nl/Nl/64/Nl) -> padding needed for arg0 @ dword #0
+    // 1110b (Nl/Nl/Nl/64) -> ok
+    // 1111b (Nl/Nl/Nl/Nl) -> ok
+    if ((ArgLayout == 0x07) || ((ArgLayout & 0x07) == 0x02))
+      Padding = 3; // dword # to be zeroed
+    else if ((ArgLayout & 0x03) == 0x01)
+      Padding = 1; // dword # to be zeroed
+
+    // Padding is only needed if this actually belongs to stacked data
+    if ((UINTN) &ArgPtr[Padding] > (UINTN) FramePtr)
+      Padding = 0;
+    // Since we have at most one arg we need to shift, just shift the whole
+    // stack 4 bytes left, up to our argument, and then fill a zero in.
+    // TODO: Don't modify the stack - pad the registers in the assembly instead
+    if (Padding) {
+      // Preserve the bytes we are about to override
+      BackupData = ArgPtr[-1];
+      for (i = 0; i < Padding; i++)
+        ArgPtr[i - 1] = ArgPtr[i];
+      ArgPtr[i - 1] = 0;
+    }
+
+    //
     // Note that we are not able to distinguish which part of the interval
     // [NewStackPointer, FramePtr] consists of stacked function arguments for
     // this call, and which part simply consists of locals in the caller's
     // stack frame. All we know is that there is an 8 byte gap at the top that
     // we can ignore.
     //
-    VmPtr->Gpr[7] = EbcLLCALLEXNative (FuncAddr, NewStackPointer, FramePtr - 8);
+    VmPtr->Gpr[7] = EbcLLCALLEXNative (FuncAddr,
+        NewStackPointer - (Padding ? 4 : 0), FramePtr - 8);
+
+    // Restore the stack data to its original content
+    if (Padding) {
+      for (i = Padding - 1; i >= 0 ; i--)
+        ArgPtr[i] = ArgPtr[i - 1];
+      // Restore overridden bytes
+      ArgPtr[-1] = BackupData;
+    }
 
     //
     // Advance the IP.
@@ -464,4 +864,3 @@ EbcLLCALLEX (
     VmPtr->Ip += Size;
   }
 }
-

@@ -120,6 +120,30 @@ VmReadIndex64 (
   OUT INT64         *ConstUnitsPtr
   );
 
+#ifdef MDE_CPU_ARM
+/**
+  Updates the stack tracker indexes
+
+  @param VmPtr         The pointer to current VM context.
+  @param NaturalUnits  The number of natural values that were pushed (>0) or
+                       popped (<0).
+  @param ConstUnits    The number of const bytes that were pushed (>0) or
+                       popped (<0).
+
+  @retval EFI_UNSUPPORTED       The VM is trying to update the stack in a
+                                manner that will break stack tracking.
+  @retval EFI_OUT_OF_RESOURCES  The stack tracker is being overflown.
+  @retval EFI_SUCCESS           The stack tracker was updated successfully.
+
+**/
+EFI_STATUS
+UpdateStackTracker(
+  IN VM_CONTEXT *VmPtr,
+  IN INT64 NaturalUnits,
+  IN INT64 ConstUnits
+  );
+#endif
+
 /**
   Reads 8-bit data form the memory address.
 
@@ -1581,6 +1605,11 @@ ExecuteMOVxx (
   UINT64  Data64;
   UINT64  DataMask;
   UINTN   Source;
+#ifdef MDE_CPU_ARM
+  INT64   NaturalUnitsOp2;
+  INT64   ConstUnitsOp2;
+  EFI_STATUS Status;
+#endif
 
   Opcode    = GETOPCODE (VmPtr);
   OpcMasked = (UINT8) (Opcode & OPCODE_M_OPCODE);
@@ -1618,7 +1647,11 @@ ExecuteMOVxx (
       }
 
       if ((Opcode & OPCODE_M_IMMED_OP2) != 0) {
+#ifdef MDE_CPU_ARM
+        Index16     = VmReadIndex16 (VmPtr, Size, &NaturalUnitsOp2, &ConstUnitsOp2);
+#else
         Index16     = VmReadIndex16 (VmPtr, Size, NULL, NULL);
+#endif
         Index64Op2  = (INT64) Index16;
         Size += sizeof (UINT16);
       }
@@ -1633,7 +1666,11 @@ ExecuteMOVxx (
       }
 
       if ((Opcode & OPCODE_M_IMMED_OP2) != 0) {
+#ifdef MDE_CPU_ARM
+        Index32     = VmReadIndex32 (VmPtr, Size, &NaturalUnitsOp2, &ConstUnitsOp2);
+#else
         Index32     = VmReadIndex32 (VmPtr, Size, NULL, NULL);
+#endif
         Index64Op2  = (INT64) Index32;
         Size += sizeof (UINT32);
       }
@@ -1647,7 +1684,11 @@ ExecuteMOVxx (
       }
 
       if ((Opcode & OPCODE_M_IMMED_OP2) != 0) {
+#ifdef MDE_CPU_ARM
+        Index64Op2 = VmReadIndex64 (VmPtr, Size, &NaturalUnitsOp2, &ConstUnitsOp2);
+#else
         Index64Op2 = VmReadIndex64 (VmPtr, Size, NULL, NULL);
+#endif
         Size += sizeof (UINT64);
       }
     } else {
@@ -1760,6 +1801,22 @@ ExecuteMOVxx (
       }
     }
   }
+
+#ifdef MDE_CPU_ARM
+  if ((OPERAND1_REGNUM(Operands) == 0) && (!OPERAND1_INDIRECT(Operands))) {
+    // The stack pointer (R0) is being directly modified - track it
+    if ((OPERAND2_REGNUM(Operands) == 0) && (!OPERAND2_INDIRECT(Operands))) {
+      // MOV R0, R0(n, c)
+      // TODO: Need to check for other R0 updates
+      if (Opcode & OPCODE_M_IMMED_OP2) {
+        Status = UpdateStackTracker (VmPtr, NaturalUnitsOp2, ConstUnitsOp2);
+        if (Status != EFI_SUCCESS)
+          return Status;
+      }
+    }
+  }
+#endif
+
   //
   // Now write it back
   //
@@ -2733,6 +2790,9 @@ ExecutePUSHn (
   //
   VmPtr->Gpr[0] -= sizeof (UINTN);
   VmWriteMemN (VmPtr, (UINTN) VmPtr->Gpr[0], DataN);
+#ifdef MDE_CPU_ARM
+  return UpdateStackTracker (VmPtr, -1LL, 0LL);
+#endif
   return EFI_SUCCESS;
 }
 
@@ -2809,6 +2869,9 @@ ExecutePUSH (
     VmWriteMem32 (VmPtr, (UINTN) VmPtr->Gpr[0], Data32);
   }
 
+#ifdef MDE_CPU_ARM
+  return UpdateStackTracker (VmPtr, 0, (Opcode & PUSHPOP_M_64) ? -8LL : -4LL);
+#endif
   return EFI_SUCCESS;
 }
 
@@ -2868,6 +2931,9 @@ ExecutePOPn (
     VmPtr->Gpr[OPERAND1_REGNUM (Operands)] = (INT64) (UINT64) ((UINTN) DataN + Index16);
   }
 
+#ifdef MDE_CPU_ARM
+  return UpdateStackTracker (VmPtr, 1LL, 0LL);
+#endif
   return EFI_SUCCESS;
 }
 
@@ -2947,6 +3013,9 @@ ExecutePOP (
     }
   }
 
+#ifdef MDE_CPU_ARM
+  return UpdateStackTracker (VmPtr, 0, (Opcode & PUSHPOP_M_64) ? 8LL : 4LL);
+#endif
   return EFI_SUCCESS;
 }
 

@@ -62,6 +62,10 @@ typedef struct {
   UINTN             ImageBase;
   VOID              *StackPool;
   VOID              *StackTop;
+#ifdef MDE_CPU_ARM
+  UINT8             *StackTracker;           ///< workaround for Arm register parameter enqueueing
+  INTN              StackTrackerIndex;
+#endif
 } VM_CONTEXT;
 
 /**
