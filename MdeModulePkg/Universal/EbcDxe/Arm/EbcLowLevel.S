@@ -17,14 +17,18 @@
 //
 //**/
 
-.syntax unified
+    .thumb
+    .syntax unified
 
-ASM_GLOBAL ASM_PFX(EbcLLCALLEXNative);
-ASM_GLOBAL ASM_PFX(EbcLLEbcInterpret);
-ASM_GLOBAL ASM_PFX(EbcLLExecuteEbcImageEntryPoint);
-ASM_GLOBAL ASM_PFX(CopyMem);
+ASM_GLOBAL ASM_PFX(EbcLLCALLEXNative)
+ASM_GLOBAL ASM_PFX(EbcLLEbcInterpret)
+ASM_GLOBAL ASM_PFX(EbcLLExecuteEbcImageEntryPoint)
 
-ASM_GLOBAL ASM_PFX(mEbcInstructionBufferTemplate);
+INTERWORK_FUNC(EbcLLCALLEXNative)
+INTERWORK_FUNC(EbcLLEbcInterpret)
+INTERWORK_FUNC(EbcLLExecuteEbcImageEntryPoint)
+
+ASM_GLOBAL ASM_PFX(mEbcInstructionBufferTemplate)
 
 //****************************************************************************
 // EbcLLCALLEX
@@ -37,9 +41,8 @@ ASM_GLOBAL ASM_PFX(mEbcInstructionBufferTemplate);
 //
 //****************************************************************************
 // UINTN EbcLLCALLEXNative(UINTN FuncAddr, UINTN NewStackPointer, VOID *FramePtr)
-    .type   EbcLLCALLEXNative, %function
 ASM_PFX(EbcLLCALLEXNative):
-    mov     ip, r1                  // Preserve r1
+    mov     ip, r0                  // Preserve r0
 
     //
     // If the EBC stack frame is smaller than or equal to 16 bytes, we know there
@@ -49,25 +52,10 @@ ASM_PFX(EbcLLCALLEXNative):
     //
     sub     r3, r2, r1              // Length = NewStackPointer - FramePtr
     cmp     r3, #16
-    bgt     4f
+    bgt     0f
 
-    // Be weary of trying to optimize the branching below...
-    cmp     r3, #0
-    beq     0f
-    cmp     r3, #4
-    beq     1f
-    cmp     r3, #8
-    beq     2f
-    cmp     r3, #12
-    beq     3f
-    ldr     r3, [ip, #12]
-3:  ldr     r2, [ip, #8]
-2:  ldr     r1, [ip, #4]
-1:  ldr     ip, [ip]
-
-0:  eor     r0, r0, ip              // Swap r0 and ip
-    eor     ip, r0, ip
-    eor     r0, r0, ip
+    ldrd    r2, r3, [r1, #8]
+    ldrd    r0, r1, [r1]
 
     bx      ip
 
@@ -76,25 +64,32 @@ ASM_PFX(EbcLLCALLEXNative):
     // the part of the VM stack exceeding 16 bytes (which may contain stacked
     // arguments) to the native stack
     //
-4:  stmdb   sp!, {r4-r6, lr}
-    mov     r4, sp                  // Preserve the orginal stack address
-    mov     r5, r0
-    mov     r6, ip
+0:  push    {r4, lr}
+    mov     r4, sp
 
-    sub     r2, r3, #16             // Size without reg params
-    sub     sp, sp, r2              // Allocate required space on the native stack
-    and     sp, sp, #0xfffffff8     // Ensure that the stack pointer remains 8 byte aligned
-    mov     r0, sp
-    add     r1, r1, #16
-    bl      ASM_PFX(CopyMem)
-    mov     ip, r6
-    ldrd    r0, r1, [ip]
-    ldrd    r2, r3, [ip, #8]
+    //
+    // Ensure that the stack pointer remains 8 byte aligned,
+    // even if the size of the VM stack frame is not a multiple of 8
+    //
+    add     r1, r1, #16             // Skip over [potential] reg params
+    tst     r3, #7                  // Multiple of 8?
+    beq     1f
+    ldr     r3, [r2, #-4]!          // No? Then push one word
+    str     r3, [sp, #-8]!          // ... but use two slots
+    b       2f
 
-    blx     r5
+1:  ldrd    r0, r3, [r2, #-8]!
+    strd    r0, r3, [sp, #-8]!
+2:  cmp     r2, r1
+    bgt     1b
+
+    ldrd    r2, r3, [r1, #-8]
+    ldrd    r0, r1, [r1, #-16]
+
+    blx     ip
 
     mov     sp, r4
-    ldmia   sp!, {r4-r6, pc}
+    pop     {r4, pc}
 
 //****************************************************************************
 // EbcLLEbcInterpret
@@ -105,20 +100,26 @@ ASM_PFX(EbcLLCALLEXNative):
 // EBCInterpret is called.
 //
 //****************************************************************************
-    .type   EbcLLEbcInterpret, %function
 ASM_PFX(EbcLLEbcInterpret):
-    stmdb   sp!, {r4, lr}
+    .cfi_startproc
+    push    {r4, lr}
+    .cfi_def_cfa_offset     8
+    .cfi_offset             4, -8
+    .cfi_offset             14, -4
 
     // push the entry point and the address of args #5 - #16 onto the stack
     add     r4, sp, #8
-    str     ip, [sp, #-8]!
-    str     r4, [sp, #4]
+    .cfi_def_cfa_offset     16
+    strd    ip, r4, [sp, #-8]!
 
     // call C-code
-    bl      ASM_PFX(EbcInterpret)
+    ldr     ip, [ip, #20]
+    blx     ip
 
     add     sp, sp, #8
-    ldmia   sp!, {r4, pc}
+    .cfi_def_cfa_offset     8
+    pop     {r4, pc}
+    .cfi_endproc
 
 //****************************************************************************
 // EbcLLExecuteEbcImageEntryPoint
@@ -128,13 +129,11 @@ ASM_PFX(EbcLLEbcInterpret):
 // ExecuteEbcImageEntryPoint is called.
 //
 //****************************************************************************
-    .thumb
-    .type   EbcLLExecuteEbcImageEntryPoint, %function
 ASM_PFX(EbcLLExecuteEbcImageEntryPoint):
-    mov     r2, ip
+    ldr     r2, [ip, #12]
 
     // tail call to C code
-    b.w     ASM_PFX(ExecuteEbcImageEntryPoint)
+    b       ASM_PFX(ExecuteEbcImageEntryPoint)
 
 //****************************************************************************
 // mEbcInstructionBufferTemplate
@@ -143,13 +142,13 @@ ASM_PFX(EbcLLExecuteEbcImageEntryPoint):
     .align      2
     .arm
 ASM_PFX(mEbcInstructionBufferTemplate):
-    ldr     ip, 0f
-    ldr     pc, 1f
+    adr     ip, .
+    ldr     pc, 0f
 
     //
     // Add a magic code here to help the VM recognize the thunk.
     //
-    .long   0xCA112EBC
+    udf     #0xEBC
 
-0:  .long   0   // EBC_ENTRYPOINT_SIGNATURE
-1:  .long   0   // EBC_LL_EBC_ENTRYPOINT_SIGNATURE
+    .long   0                       // EBC_ENTRYPOINT_SIGNATURE
+0:  .long   0                       // EBC_LL_EBC_ENTRYPOINT_SIGNATURE
