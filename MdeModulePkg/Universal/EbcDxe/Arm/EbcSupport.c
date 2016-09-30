@@ -26,8 +26,9 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 #define STACK_REMAIN_SIZE (1024 * 4)
 //
 // Amount of space to be used by the stack argument tracker
-// Less than 2 bits are needed for every 32 bits of stack data -> 1/32th.
-#define STACK_TRACKER_SIZE (STACK_POOL_SIZE / 32)
+// Less than 2 bits are needed for every 32 bits of stack data
+// and we can grow our buffer if needed, so start at 1/64th
+#define STACK_TRACKER_SIZE  (STACK_POOL_SIZE / 64)
 
 #pragma pack(1)
 typedef struct {
@@ -135,8 +136,10 @@ GetStackTrackerIndex (
 {
   UINT8 Index, IndexPrev;
 
-  if (VmPtr->StackTrackerIndex < 0)
+  if (VmPtr->StackTrackerIndex < 0) {
+    // Anything prior to tracking is considered aligned to 64 bits
     return 0x00;
+  }
 
   Index = VmPtr->StackTracker[(VmPtr->StackTrackerIndex - 1) / 4];
   Index >>= 6 - (2 * ((VmPtr->StackTrackerIndex - 1) % 4));
@@ -166,7 +169,6 @@ GetStackTrackerIndex (
   }
 
 //  PrintHex(L"Get: ", Index);
-//  WaitForKey();
   return Index;
 }
 
@@ -179,8 +181,9 @@ GetStackTrackerIndex (
   @retval EFI_OUT_OF_RESOURCES  The stack tracker is being overflown.
   @retval EFI_SUCCESS           The index was added successfully.
 
-    byte 0   byte 1    byte 3
-  [0|1|2|3] [4|5|6|7] [8|9|...]
+  For reference, each 2-bit index sequence is stored as follows:
+    Stack tracker byte:     byte 0   byte 1    byte 3
+    Stack tracker index:  [0|1|2|3] [4|5|6|7] [8|9|...]
 **/
 EFI_STATUS
 AddStackTrackerIndex (
@@ -190,7 +193,6 @@ AddStackTrackerIndex (
 {
   UINT8 i, Data;
 
-//  PrintHex(L"Add: ", Index);
   // Valid values are [0x00, 0x08], which get encoded as:
   // 0000b -> 00b      (single 2-bit sequence)
   // 0001b -> 01b 10b  (dual 2-bit sequence)
@@ -202,23 +204,27 @@ AddStackTrackerIndex (
   // 0111b -> 11b 11b  (dual 2-bit sequence)
   // 1000b -> 01b      (single 2-bit sequence)
   ASSERT(Index <= 0x08);
-  if (Index == 0x08)
+  if (Index == 0x08) {
     Data = 0x01;
-  else
+  } else {
     Data = Index & 0x03;
+  }
 
   for (i = 0; i < 2; i++) {
-    // Make sure we don't overflow our buffer
-    if (VmPtr->StackTrackerIndex / 4 > STACK_TRACKER_SIZE) {
-PrintStr(L"AddStackTrackerIndex - overflow\r\n");
-      return EFI_OUT_OF_RESOURCES;
+    if ((VmPtr->StackTrackerIndex / 4) >= VmPtr->StackTrackerSize) {
+      // Grow the stack tracker buffer
+      VmPtr->StackTracker = ReallocatePool(VmPtr->StackTrackerSize, VmPtr->StackTrackerSize*2, VmPtr->StackTracker);
+      if (VmPtr->StackTracker == NULL) {
+        return EFI_OUT_OF_RESOURCES;
+      }
+      VmPtr->StackTrackerSize *= 2;
     }
     // Ensure that we clear bits we don't use yet
     VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4] &= 0xFC << (6 - 2 * (VmPtr->StackTrackerIndex % 4));
     VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4] |= Data << (6 - 2 * (VmPtr->StackTrackerIndex % 4));
     VmPtr->StackTrackerIndex++;
     if ((Index >= 0x01) && (Index <= 0x07)) {
-      // Append the extra 2 bit value
+      // 4-bits needed => Append the extra 2 bit value
       Data = (Index >> 2) | 0x02;
     } else {
       // 2-bit encoding was enough
@@ -247,13 +253,16 @@ DelStackTrackerIndex (
   VmPtr->StackTrackerIndex--;
   Index = VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4];
   Index >>= 6 - (2 * (VmPtr->StackTrackerIndex % 4));
-//PrintHex(L"Del: ", Index);
-  if (Index & 0x02) // dual sequence
+
+  if (Index & 0x02) {
+    // Dual sequence
     VmPtr->StackTrackerIndex--;
+  }
   if (VmPtr->StackTrackerIndex < 0) {
 PrintStr(L"DelStackTrackerIndex - underflow\r\n");
+WaitForKey();
     return EFI_OUT_OF_RESOURCES;
-   }
+  }
   return EFI_SUCCESS;
 }
 
@@ -283,8 +292,6 @@ UpdateStackTracker (
   EFI_STATUS Status;
   UINT8 LastIndex;
   INT64 i;
-//  PrintHex(L"Update Nat: ", (INT32)NaturalUnits);
-//  PrintHex(L"Update Cst: ", (INT32)ConstUnits);
 
   // If we have both natural and constant negative values, we can't guess the
   // order so return an error. Note that this is not an issue for negative,
@@ -294,14 +301,14 @@ PrintStr(L"UpdateStackTracker: (NaturalUnits < 0) && (ConstUnits < 0)\r\n");
     return EFI_UNSUPPORTED;
   }
 
-  if ((NaturalUnits == 0) && (ConstUnits == 0))
+  if ((NaturalUnits == 0) && (ConstUnits == 0)) {
     // Nothing to do
     return EFI_SUCCESS;
+  }
 
-  // Mismatched signage should already have been filtered out, but test for it
-  // just in case.
+  // Mismatched signage should already have been filtered out,
+  // but test for it just in case.
   if ( ((NaturalUnits > 0) && (ConstUnits < 0)) || ((NaturalUnits < 0) && (ConstUnits > 0)) ) {
-PrintStr(L"UpdateStackTracker: Sign mismatch\r\n");
     return EFI_UNSUPPORTED;
   }
 
@@ -310,11 +317,11 @@ PrintStr(L"UpdateStackTracker: Sign mismatch\r\n");
     // Note, we don't care if the previous entry was aligned here
     for (i = 0; i > NaturalUnits; i--) {
       Status = AddStackTrackerIndex(VmPtr, 0x08);
-      if (Status != EFI_SUCCESS)
+      if (Status != EFI_SUCCESS) {
         return Status;
+      }
     }
   } else if (ConstUnits < 0) {
-//PrintStr(L"ConstUnits < 0\r\n");
     // Add constant indexes (000b-111b) to our stack tracker
     // For constants, we do care if the previous entry was aligned to 64 bit
     // since we need to include any existing non aligned indexes into the new
@@ -329,45 +336,51 @@ PrintStr(L"UpdateStackTracker: Sign mismatch\r\n");
     // Now, add as many 64 bit indexes as we can (0x00 values)
     for (i = -8; i >= ConstUnits; i -= 8) {
       Status = AddStackTrackerIndex(VmPtr, 0x00);
-      if (Status != EFI_SUCCESS)
+      if (Status != EFI_SUCCESS) {
         return Status;
+      }
     }
     // Add any remaining misaligned bytes
     if (ConstUnits % 8) {
       Status = AddStackTrackerIndex(VmPtr, (-ConstUnits) % 8);
-      if (Status != EFI_SUCCESS)
+      if (Status != EFI_SUCCESS) {
         return Status;
+      }
     }
   } else {
-//PrintStr(L"Pos Vals\r\n");
     // Positive values => remove items from the stack tracker
     while ((NaturalUnits > 0) || (ConstUnits > 0)) {
       LastIndex = GetStackTrackerIndex(VmPtr);
       Status = DelStackTrackerIndex(VmPtr);
-      if (Status != EFI_SUCCESS)
+      if (Status != EFI_SUCCESS) {
         return Status;
+      }
       if (LastIndex == 0x08) {
         // Remove a natural
         if (NaturalUnits <= 0) {
           // Got a natural while expecting const => EBC code unbalanced stack
 PrintStr(L"UpdateStackTracker: Unbalanced const ops\r\n");
+WaitForKey();
           return EFI_UNSUPPORTED;
         }
         NaturalUnits--;
       } else {
         // Remove a set of const bytes
-        if (LastIndex == 0x00)
+        if (LastIndex == 0x00) {
           LastIndex = 0x08;
+        }
         if (ConstUnits <= 0) {
           // Got a const while expecting natural => EBC code unbalanced stack
 PrintStr(L"UpdateStackTracker: Unbalanced natural ops\r\n");
+WaitForKey();
           return EFI_UNSUPPORTED;
         } else if (ConstUnits >= LastIndex) {
           ConstUnits -= LastIndex;
         } else { // We have a remainder - add it back
           Status = AddStackTrackerIndex(VmPtr, LastIndex - ConstUnits);
-          if (Status != EFI_SUCCESS)
+          if (Status != EFI_SUCCESS) {
             return Status;
+          }
           ConstUnits = 0;
         }
       }

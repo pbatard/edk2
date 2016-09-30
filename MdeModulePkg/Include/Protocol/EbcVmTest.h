@@ -64,8 +64,8 @@ typedef struct {
   VOID              *StackTop;
 #ifdef MDE_CPU_ARM
   UINT8             *StackTracker;           ///< workaround for Arm register parameter enqueueing
-  INTN              StackTrackerSize;
-  INTN              StackTrackerIndex;
+  INTN              StackTrackerSize;        ///< size of the stack tracker buffer, in bytes
+  INTN              StackTrackerIndex;       ///< current stack tracker index, in 1/4th bytes
 #endif
 } VM_CONTEXT;
 
