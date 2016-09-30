@@ -434,6 +434,18 @@ EbcInterpret (
   VmContext.Ip = (VMIP) Addr;
 
   //
+  // Allocate the stack tracker and initialize it
+  //
+  VmContext.StackTrackerSize = STACK_TRACKER_SIZE;
+  VmContext.StackTracker = AllocatePool(VmContext.StackTrackerSize);
+  if (VmContext.StackTracker == NULL) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+  // Add tracking for EfiMain() call just in case
+  VmContext.StackTracker[0] = 0x05; // 2 x UINT64, 2 x UINTN
+  VmContext.StackTrackerIndex = 4;
+
+  //
   // Initialize the stack pointer for the EBC. Get the current system stack
   // pointer and adjust it down by the max needed for the interpreter.
   //
@@ -448,10 +460,8 @@ EbcInterpret (
   }
 
   // Reserve space at the bottom of the allocated stack for the stack argument tracker
-  VmContext.StackTracker = (UINT8*)VmContext.StackPool;
-  VmContext.StackTrackerIndex = 0;
-  VmContext.StackTop = (UINT8*)VmContext.StackPool + STACK_REMAIN_SIZE + STACK_TRACKER_SIZE;
-  VmContext.Gpr[0] = (UINT32) ((UINT8*)VmContext.StackPool + STACK_POOL_SIZE - STACK_TRACKER_SIZE);
+  VmContext.StackTop = (UINT8*)VmContext.StackPool + STACK_REMAIN_SIZE;
+  VmContext.Gpr[0] = (UINT32) ((UINT8*)VmContext.StackPool + STACK_POOL_SIZE);
   VmContext.HighStackBottom = (UINTN) VmContext.Gpr[0];
   VmContext.Gpr[0] -= sizeof (UINTN);
 
@@ -529,6 +539,7 @@ EbcInterpret (
   // Return the value in R[7] unless there was an error
   //
   ReturnEBCStack(StackIndex);
+  FreePool(VmContext.StackTracker);
   return (UINT64) VmContext.Gpr[7];
 }
 
@@ -588,6 +599,18 @@ ExecuteEbcImageEntryPoint (
   VmContext.Ip = (VMIP) Addr;
 
   //
+  // Allocate and initialize the stack tracker
+  //
+  VmContext.StackTrackerSize = STACK_TRACKER_SIZE;
+  VmContext.StackTracker = AllocatePool(VmContext.StackTrackerSize);
+  if (VmContext.StackTracker == NULL) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+  // Add tracking for EfiMain() call just in case
+  VmContext.StackTracker[0] = 0x05; // 2 x UINT64, 2 x UINTN
+  VmContext.StackTrackerIndex = 4;
+
+  //
   // Initialize the stack pointer for the EBC. Get the current system stack
   // pointer and adjust it down by the max needed for the interpreter.
   //
@@ -599,11 +622,8 @@ ExecuteEbcImageEntryPoint (
   if (EFI_ERROR(Status)) {
     return Status;
   }
-  // Reserve space at the bottom of the allocated stack for the stack argument tracker
-  VmContext.StackTracker = (UINT8*)VmContext.StackPool;
-  VmContext.StackTrackerIndex = 0;
-  VmContext.StackTop = (UINT8*)VmContext.StackPool + STACK_REMAIN_SIZE + STACK_TRACKER_SIZE;
-  VmContext.Gpr[0] = (UINT32)((UINT8*)VmContext.StackPool + STACK_POOL_SIZE - STACK_TRACKER_SIZE);
+  VmContext.StackTop = (UINT8*)VmContext.StackPool + STACK_REMAIN_SIZE;
+  VmContext.Gpr[0] = (UINT32)((UINT8*)VmContext.StackPool + STACK_POOL_SIZE);
   VmContext.HighStackBottom = (UINTN)VmContext.Gpr[0];
   VmContext.Gpr[0] -= sizeof (UINTN);
 
@@ -638,6 +658,7 @@ ExecuteEbcImageEntryPoint (
   // Return the value in R[7] unless there was an error
   //
   ReturnEBCStack(StackIndex);
+  FreePool(VmContext.StackTracker);
   return (UINT64) VmContext.Gpr[7];
 }
 
