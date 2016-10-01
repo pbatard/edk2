@@ -122,7 +122,7 @@ PushU32 (
 }
 
 /**
-  Returns the current stack tracker index entry.
+  Returns the current stack tracker entry.
 
   @param VmPtr  The pointer to current VM context.
 
@@ -173,13 +173,13 @@ GetStackTrackerIndex (
 }
 
 /**
-  Add a new stack tracker index entry.
+  Add a single new stack tracker entry.
 
   @param VmPtr  The pointer to current VM context.
   @param Value  The value to be encoded.
 
-  @retval EFI_OUT_OF_RESOURCES  The stack tracker is being overflown.
-  @retval EFI_SUCCESS           The index was added successfully.
+  @retval EFI_OUT_OF_RESOURCES  Not enough memory to grow the stack tracker.
+  @retval EFI_SUCCESS           The entry was added successfully.
 
   For reference, each 2-bit index sequence is stored as follows:
     Stack tracker byte:     byte 0   byte 1    byte 3
@@ -203,7 +203,7 @@ AddStackTrackerIndex (
   // 0110b -> 10b 11b  (dual 2-bit sequence)
   // 0111b -> 11b 11b  (dual 2-bit sequence)
   // 1000b -> 01b      (single 2-bit sequence)
-  ASSERT(Index <= 0x08);
+  ASSERT (Index <= 0x08);
   if (Index == 0x08) {
     Data = 0x01;
   } else {
@@ -235,11 +235,55 @@ AddStackTrackerIndex (
 }
 
 /**
-  Delete an existing stack tracker index entry.
+  Insert 'Count' number of 'Value' bytes into the stack tracker
+  This expects the current entry to be aligned to byte boundary.
+
+  @param VmPtr  The pointer to current VM context.
+  @param Value  The byte value to be inserted.
+  @param Count  The number of times the value should be repeated.
+
+  @retval EFI_OUT_OF_RESOURCES  Not enough memory to grow the stack tracker.
+  @retval EFI_SUCCESS           The entries were added successfully.
+
+**/
+EFI_STATUS
+AddStackTrackerBytes (
+  IN VM_CONTEXT *VmPtr,
+  IN UINT8 Value,
+  IN INTN Count
+)
+{
+  UINTN i, NewSize;
+  INTN UpdatedIndex;
+
+  // Byte alignement should have been sorted prior to this call
+  ASSERT (VmPtr->StackTrackerIndex % 4 == 0);
+
+  UpdatedIndex = VmPtr->StackTrackerIndex + 4 * Count;
+  if (UpdatedIndex >= VmPtr->StackTrackerSize) {
+    // Grow the stack tracker buffer
+    for (NewSize = VmPtr->StackTrackerSize * 2; NewSize <= UpdatedIndex; NewSize *= 2);
+    VmPtr->StackTracker = ReallocatePool(VmPtr->StackTrackerSize, NewSize, VmPtr->StackTracker);
+    if (VmPtr->StackTracker == NULL) {
+      return EFI_OUT_OF_RESOURCES;
+    }
+    VmPtr->StackTrackerSize = NewSize;
+  }
+  for (i = 0; i < Count; i++) {
+    VmPtr->StackTracker[(VmPtr->StackTrackerIndex % 4) + i] = Value;
+  }
+  VmPtr->StackTrackerIndex += Count * 4;
+  return EFI_SUCCESS;
+}
+
+
+/**
+  Delete a single stack tracker entry.
 
   @param VmPtr  The pointer to current VM context.
 
-  @retval EFI_OUT_OF_RESOURCES  The stack tracker is being underflown.
+  @retval EFI_UNSUPPORTED       The stack tracker is being underflown due to
+                                unbalanced stack operations.
   @retval EFI_SUCCESS           The index was added successfully.
 **/
 EFI_STATUS
@@ -261,7 +305,7 @@ DelStackTrackerIndex (
   if (VmPtr->StackTrackerIndex < 0) {
 PrintStr(L"DelStackTrackerIndex - underflow\r\n");
 WaitForKey();
-    return EFI_OUT_OF_RESOURCES;
+    return EFI_UNSUPPORTED;
   }
   return EFI_SUCCESS;
 }
@@ -276,9 +320,9 @@ WaitForKey();
   @param ConstUnits    The number of const bytes that were pushed (>0) or
                        popped (<0).
 
-  @retval EFI_UNSUPPORTED       The VM is trying to update the stack in a
-                                manner that breaks stack tracking.
-  @retval EFI_OUT_OF_RESOURCES  The stack tracker is being overflown.
+  @retval EFI_OUT_OF_RESOURCES  Not enough memory to grow the stack tracker.
+  @retval EFI_UNSUPPORTED       The stack tracker is being underflown due to
+                                unbalanced stack operations.
   @retval EFI_SUCCESS           The stack tracker was updated successfully.
 
 **/
@@ -291,98 +335,107 @@ UpdateStackTracker (
 {
   EFI_STATUS Status;
   UINT8 LastIndex;
-  INT64 i;
 
-  // If we have both natural and constant negative values, we can't guess the
-  // order so return an error. Note that this is not an issue for negative,
-  // values, as we can match the depletion order from our tracker.
-  if ((NaturalUnits < 0) && (ConstUnits < 0)) {
-PrintStr(L"UpdateStackTracker: (NaturalUnits < 0) && (ConstUnits < 0)\r\n");
-    return EFI_UNSUPPORTED;
-  }
+  // Mismatched signage should already have been filtered out.
+  ASSERT ( ((NaturalUnits >= 0) && (ConstUnits >= 0)) ||
+           ((NaturalUnits <= 0) && (ConstUnits <= 0)) )
 
-  if ((NaturalUnits == 0) && (ConstUnits == 0)) {
-    // Nothing to do
-    return EFI_SUCCESS;
-  }
-
-  // Mismatched signage should already have been filtered out,
-  // but test for it just in case.
-  if ( ((NaturalUnits > 0) && (ConstUnits < 0)) || ((NaturalUnits < 0) && (ConstUnits > 0)) ) {
-    return EFI_UNSUPPORTED;
-  }
-
-  if (NaturalUnits < 0) {
-    // Add natural indexes (100b) into our stack tracker
-    // Note, we don't care if the previous entry was aligned here
-    for (i = 0; i > NaturalUnits; i--) {
-      Status = AddStackTrackerIndex(VmPtr, 0x08);
-      if (Status != EFI_SUCCESS) {
-        return Status;
-      }
+  while (NaturalUnits < 0) {
+    // Add natural indexes (1000b) into our stack tracker
+    // Note, we don't care if the previous entry was aligned as a non 64-bit
+    // aligned entry cannot be used as a call parameter in valid EBC code.
+    // This also adds the effect of re-aligning our data to 64 bytes, which
+    // will help speed up tracking of local stack variables (arrays, etc.)
+    if ((VmPtr->StackTrackerIndex % 4 == 0) && (NaturalUnits <= -4)) {
+      // Optimize adding of a large number of naturals, such as the ones
+      // reserved for local function variables/arrays. 0x55 = 4 naturals.
+      Status = AddStackTrackerBytes (VmPtr, 0x55, -1 * (INTN)(NaturalUnits / 4));
+      NaturalUnits -= 4 * (NaturalUnits / 4); // Beware of negative modulos
+    } else {
+      Status = AddStackTrackerIndex (VmPtr, 0x08);
+      NaturalUnits++;
     }
-  } else if (ConstUnits < 0) {
-    // Add constant indexes (000b-111b) to our stack tracker
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+  }
+
+  if (ConstUnits < 0) {
+    // Add constant indexes (0000b-0111b) into our stack tracker
     // For constants, we do care if the previous entry was aligned to 64 bit
     // since we need to include any existing non aligned indexes into the new
     // set of (constant) indexes we are adding. Thus, if the last index is
     // non zero (non 64-bit aligned) we just delete it and add the value to
     // our constant.
-    LastIndex = GetStackTrackerIndex(VmPtr);
+    LastIndex = GetStackTrackerIndex (VmPtr);
     if ((LastIndex != 0x00) && (LastIndex != 0x08)) {
-      DelStackTrackerIndex(VmPtr);
+      DelStackTrackerIndex (VmPtr);
       ConstUnits -= LastIndex;
     }
-    // Now, add as many 64 bit indexes as we can (0x00 values)
-    for (i = -8; i >= ConstUnits; i -= 8) {
-      Status = AddStackTrackerIndex(VmPtr, 0x00);
-      if (Status != EFI_SUCCESS) {
-        return Status;
-      }
-    }
-    // Add any remaining misaligned bytes
-    if (ConstUnits % 8) {
-      Status = AddStackTrackerIndex(VmPtr, (-ConstUnits) % 8);
-      if (Status != EFI_SUCCESS) {
-        return Status;
-      }
-    }
-  } else {
-    // Positive values => remove items from the stack tracker
-    while ((NaturalUnits > 0) || (ConstUnits > 0)) {
-      LastIndex = GetStackTrackerIndex(VmPtr);
-      Status = DelStackTrackerIndex(VmPtr);
-      if (Status != EFI_SUCCESS) {
-        return Status;
-      }
-      if (LastIndex == 0x08) {
-        // Remove a natural
-        if (NaturalUnits <= 0) {
-          // Got a natural while expecting const => EBC code unbalanced stack
-PrintStr(L"UpdateStackTracker: Unbalanced const ops\r\n");
-WaitForKey();
-          return EFI_UNSUPPORTED;
-        }
-        NaturalUnits--;
+    // Now, add as many 64-bit indexes as we can (0000b values)
+    while (ConstUnits <= -8) {
+      if ((ConstUnits <= -32) && (VmPtr->StackTrackerIndex % 4 == 0)) {
+        // Optimize adding of a large number of consts, such as the ones
+        // reserved for local function variables/arrays. 0x00 = 4 64-bit consts.
+        Status = AddStackTrackerBytes (VmPtr, 0x00, -1 * (INTN)(ConstUnits / 32));
+        ConstUnits -= 32 * (ConstUnits / 32); // Beware of negative modulos
       } else {
-        // Remove a set of const bytes
-        if (LastIndex == 0x00) {
-          LastIndex = 0x08;
-        }
-        if (ConstUnits <= 0) {
-          // Got a const while expecting natural => EBC code unbalanced stack
-PrintStr(L"UpdateStackTracker: Unbalanced natural ops\r\n");
-WaitForKey();
-          return EFI_UNSUPPORTED;
-        } else if (ConstUnits >= LastIndex) {
-          ConstUnits -= LastIndex;
-        } else { // We have a remainder - add it back
-          Status = AddStackTrackerIndex(VmPtr, LastIndex - ConstUnits);
-          if (Status != EFI_SUCCESS) {
-            return Status;
-          }
-          ConstUnits = 0;
-        }
+        Status = AddStackTrackerIndex (VmPtr, 0x00);
+        ConstUnits += 8;
+      }
+      if (EFI_ERROR (Status)) {
+        return Status;
+      }
+    }
+    // Add any remaining non 64-bit aligned bytes
+    if (ConstUnits % 8) {
+      Status = AddStackTrackerIndex (VmPtr, (-ConstUnits) % 8);
+      if (EFI_ERROR (Status)) {
+        return Status;
+      }
+    }
+  }
+
+  while ((NaturalUnits > 0) || (ConstUnits > 0)) {
+    // Delete natural/constant items from the stack tracker
+    LastIndex = GetStackTrackerIndex (VmPtr);
+    Status = DelStackTrackerIndex (VmPtr);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    if (LastIndex == 0x08) {
+      if (NaturalUnits > 0) {
+        // Remove a natural and move on
+        NaturalUnits--;
+        continue;
+      }
+      // Got a natural while expecting const which may be the result of a
+      // "cloaked" stack operation (eg. R1 <- R0, stack ops on R1, R0 <- R1)
+      // which we monitor through the R0 delta converted to const. In this
+      // case just remove 4 const for each natural we find in the tracker.
+      LastIndex = 0x04;
+    } else if (ConstUnits <= 0) {
+       // Got a const while expecting a natural which may be the result of a
+       // "cloaked" stack operation => Substract 1 natural unit and add 4 to
+       // const units. Note that "cloaked" stack operations cannot break our
+       // tracking as the enqueuing of natural parameters is not something
+       // that can be concealed if one interprets the EBC specs correctly.
+       NaturalUnits--;
+       ConstUnits += 4;
+    }
+    if (LastIndex == 0x00) {
+      LastIndex = 0x08;
+    }
+    // Remove a set of const bytes
+    if (ConstUnits >= LastIndex) {
+      // Enough const bytes to remove the whole stack tracker entry
+      ConstUnits -= LastIndex;
+    } else {
+      // Not enough const bytes - need to add the remainder back
+      Status = AddStackTrackerIndex (VmPtr, LastIndex - ConstUnits);
+      ConstUnits = 0;
+      if (EFI_ERROR (Status)) {
+        return Status;
       }
     }
   }
@@ -420,8 +473,8 @@ EbcInterpret (
   //
   // Sanity checks for the stack tracker
   //
-  ASSERT(sizeof(UINT64) == 8);
-  ASSERT(sizeof(UINT32) == 4);
+  ASSERT (sizeof (UINT64) == 8);
+  ASSERT (sizeof (UINT32) == 4);
 
   //
   // Create a new VM context on the stack
@@ -579,8 +632,8 @@ ExecuteEbcImageEntryPoint (
   //
   // Sanity checks for the stack tracker
   //
-  ASSERT(sizeof(UINT64) == 8);
-  ASSERT(sizeof(UINT32) == 4);
+  ASSERT (sizeof (UINT64) == 8);
+  ASSERT (sizeof (UINT32) == 4);
 
   //
   // Create a new VM context on the stack
@@ -631,7 +684,7 @@ ExecuteEbcImageEntryPoint (
   //
   // Allocate stack pool
   //
-  Status = GetEBCStack(ImageHandle, &VmContext.StackPool, &StackIndex);
+  Status = GetEBCStack (ImageHandle, &VmContext.StackPool, &StackIndex);
   if (EFI_ERROR(Status)) {
     return Status;
   }
