@@ -128,16 +128,24 @@ PushU32 (
 
   @return  The decoded stack tracker index [0x00, 0x08].
 
+  The decoding of stack tracker entries operates as follows:
+    00b                        -> 0000b
+    01b                        -> 1000b
+    1xb preceded by yzb        -> 0xyzb
+    (e.g. 11b preceded by 10b  -> 0110b)
+
 **/
 UINT8
-GetStackTrackerIndex (
+GetStackTrackerEntry (
   IN VM_CONTEXT *VmPtr
 )
 {
-  UINT8 Index, IndexPrev;
+  UINT8 Index, PreviousIndex;
 
   if (VmPtr->StackTrackerIndex < 0) {
+    //
     // Anything prior to tracking is considered aligned to 64 bits
+    //
     return 0x00;
   }
 
@@ -145,27 +153,12 @@ GetStackTrackerIndex (
   Index >>= 6 - (2 * ((VmPtr->StackTrackerIndex - 1) % 4));
   Index &= 0x03;
 
-  // Decoding operates as follows:
-  // 00b                        -> 0000b
-  // 01b                        -> 1000b
-  // 1Xb preceded by YZb        -> 0XYZb
-  // (e.g. 11b preceded by 10b  -> 0110b)
-  //
-  // Note that, in accordance with the UEFI specs, when CALLEX to native is
-  // invoked, then the *ONLY* valid values allowed for the stacked function 
-  // parameters are 0000b (for a 64 bit parameter) or 1000b (native length,
-  // which is used for standard native, or any argument that is 32-bit or
-  // smaller).
-  // Therefore any encouter with 0001b to 0111b as part of CALLEX argument
-  // processing must be rejected as unsupported code, as it signifies a
-  // programming error in the EBC application.
-  // 
   if (Index == 0x01) {
     Index = 0x08;
   } else if (Index & 0x02) {
-    IndexPrev = VmPtr->StackTracker[(VmPtr->StackTrackerIndex - 2) / 4];
-    IndexPrev >>= 6 - (2 * ((VmPtr->StackTrackerIndex - 2) % 4));
-    Index = ((Index << 2) & 0x04) | (IndexPrev & 0x03);
+    PreviousIndex = VmPtr->StackTracker[(VmPtr->StackTrackerIndex - 2) / 4];
+    PreviousIndex >>= 6 - (2 * ((VmPtr->StackTrackerIndex - 2) % 4));
+    Index = ((Index << 2) & 0x04) | (PreviousIndex & 0x03);
   }
 
 //  PrintHex(L"Get: ", Index);
@@ -184,50 +177,63 @@ GetStackTrackerIndex (
   For reference, each 2-bit index sequence is stored as follows:
     Stack tracker byte:     byte 0   byte 1    byte 3
     Stack tracker index:  [0|1|2|3] [4|5|6|7] [8|9|...]
+
+  Valid values are in [0x00, 0x08] and get encoded as:
+    0000b -> 00b      (single 2-bit sequence)
+    0001b -> 01b 10b  (dual 2-bit sequence)
+    0010b -> 10b 10b  (dual 2-bit sequence)
+    0011b -> 11b 10b  (dual 2-bit sequence)
+    0100b -> 00b 11b  (dual 2-bit sequence)
+    0101b -> 01b 11b  (dual 2-bit sequence)
+    0110b -> 10b 11b  (dual 2-bit sequence)
+    0111b -> 11b 11b  (dual 2-bit sequence)
+    1000b -> 01b      (single 2-bit sequence)
 **/
 EFI_STATUS
-AddStackTrackerIndex (
+AddStackTrackerEntry (
   IN VM_CONTEXT *VmPtr,
-  IN UINT8 Index
+  IN UINT8      Value
 )
 {
   UINT8 i, Data;
 
-  // Valid values are [0x00, 0x08], which get encoded as:
-  // 0000b -> 00b      (single 2-bit sequence)
-  // 0001b -> 01b 10b  (dual 2-bit sequence)
-  // 0010b -> 10b 10b  (dual 2-bit sequence)
-  // 0011b -> 11b 10b  (dual 2-bit sequence)
-  // 0100b -> 00b 11b  (dual 2-bit sequence)
-  // 0101b -> 01b 11b  (dual 2-bit sequence)
-  // 0110b -> 10b 11b  (dual 2-bit sequence)
-  // 0111b -> 11b 11b  (dual 2-bit sequence)
-  // 1000b -> 01b      (single 2-bit sequence)
-  ASSERT (Index <= 0x08);
-  if (Index == 0x08) {
+  ASSERT (Value <= 0x08);
+  if (Value == 0x08) {
     Data = 0x01;
   } else {
-    Data = Index & 0x03;
+    Data = Value & 0x03;
   }
 
   for (i = 0; i < 2; i++) {
     if ((VmPtr->StackTrackerIndex / 4) >= VmPtr->StackTrackerSize) {
+      //
       // Grow the stack tracker buffer
-      VmPtr->StackTracker = ReallocatePool(VmPtr->StackTrackerSize, VmPtr->StackTrackerSize*2, VmPtr->StackTracker);
+      //
+      VmPtr->StackTracker = ReallocatePool(VmPtr->StackTrackerSize,
+            VmPtr->StackTrackerSize*2, VmPtr->StackTracker);
       if (VmPtr->StackTracker == NULL) {
         return EFI_OUT_OF_RESOURCES;
       }
       VmPtr->StackTrackerSize *= 2;
     }
+
+    //
     // Ensure that we clear bits we don't use yet
-    VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4] &= 0xFC << (6 - 2 * (VmPtr->StackTrackerIndex % 4));
-    VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4] |= Data << (6 - 2 * (VmPtr->StackTrackerIndex % 4));
+    //
+    VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4] &=
+          0xFC << (6 - 2 * (VmPtr->StackTrackerIndex % 4));
+    VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4] |=
+          Data << (6 - 2 * (VmPtr->StackTrackerIndex % 4));
     VmPtr->StackTrackerIndex++;
-    if ((Index >= 0x01) && (Index <= 0x07)) {
+    if ((Value >= 0x01) && (Value <= 0x07)) {
+      //
       // 4-bits needed => Append the extra 2 bit value
-      Data = (Index >> 2) | 0x02;
+      //
+      Data = (Value >> 2) | 0x02;
     } else {
+      //
       // 2-bit encoding was enough
+      //
       break;
     }
   }
@@ -235,7 +241,7 @@ AddStackTrackerIndex (
 }
 
 /**
-  Insert 'Count' number of 'Value' bytes into the stack tracker
+  Insert 'Count' number of 'Value' bytes into the stack tracker.
   This expects the current entry to be aligned to byte boundary.
 
   @param VmPtr  The pointer to current VM context.
@@ -249,21 +255,27 @@ AddStackTrackerIndex (
 EFI_STATUS
 AddStackTrackerBytes (
   IN VM_CONTEXT *VmPtr,
-  IN UINT8 Value,
-  IN INTN Count
+  IN UINT8      Value,
+  IN INTN       Count
 )
 {
   UINTN i, NewSize;
   INTN UpdatedIndex;
 
+  //
   // Byte alignement should have been sorted prior to this call
+  //
   ASSERT (VmPtr->StackTrackerIndex % 4 == 0);
 
   UpdatedIndex = VmPtr->StackTrackerIndex + 4 * Count;
   if (UpdatedIndex >= VmPtr->StackTrackerSize) {
+    //
     // Grow the stack tracker buffer
-    for (NewSize = VmPtr->StackTrackerSize * 2; NewSize <= UpdatedIndex; NewSize *= 2);
-    VmPtr->StackTracker = ReallocatePool(VmPtr->StackTrackerSize, NewSize, VmPtr->StackTracker);
+    //
+    for (NewSize = VmPtr->StackTrackerSize * 2; NewSize <= UpdatedIndex;
+          NewSize *= 2);
+    VmPtr->StackTracker = ReallocatePool(VmPtr->StackTrackerSize, NewSize,
+          VmPtr->StackTracker);
     if (VmPtr->StackTracker == NULL) {
       return EFI_OUT_OF_RESOURCES;
     }
@@ -276,34 +288,37 @@ AddStackTrackerBytes (
   return EFI_SUCCESS;
 }
 
-
 /**
   Delete a single stack tracker entry.
 
   @param VmPtr  The pointer to current VM context.
 
-  @retval EFI_UNSUPPORTED       The stack tracker is being underflown due to
-                                unbalanced stack operations.
+  @retval EFI_UNSUPPORTED       The stack tracker is being underflown due
+                                to unbalanced stack operations.
   @retval EFI_SUCCESS           The index was added successfully.
 **/
 EFI_STATUS
-DelStackTrackerIndex (
+DelStackTrackerEntry (
   IN VM_CONTEXT *VmPtr
 )
 {
   UINT8 Index;
 
-  // We don't care about clearing the used bits, just update the index
+  //
+  // Don't care about clearing the used bits, just update the index
+  //
   VmPtr->StackTrackerIndex--;
   Index = VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4];
   Index >>= 6 - (2 * (VmPtr->StackTrackerIndex % 4));
 
   if (Index & 0x02) {
-    // Dual sequence
+    //
+    // 4-bit sequence
+    //
     VmPtr->StackTrackerIndex--;
   }
   if (VmPtr->StackTrackerIndex < 0) {
-PrintStr(L"DelStackTrackerIndex - underflow\r\n");
+PrintStr(L"DelStackTrackerEntry - underflow\r\n");
 WaitForKey();
     return EFI_UNSUPPORTED;
   }
@@ -328,31 +343,37 @@ WaitForKey();
 **/
 EFI_STATUS
 UpdateStackTracker (
-  IN VM_CONTEXT *VmPtr,
-  IN INT64 NaturalUnits,
-  IN INT64 ConstUnits
+  IN VM_CONTEXT  *VmPtr,
+  IN INTN        NaturalUnits,
+  IN INTN        ConstUnits
 )
 {
   EFI_STATUS Status;
-  UINT8 LastIndex;
+  UINT8 LastEntry;
 
+  //
   // Mismatched signage should already have been filtered out.
+  //
   ASSERT ( ((NaturalUnits >= 0) && (ConstUnits >= 0)) ||
            ((NaturalUnits <= 0) && (ConstUnits <= 0)) )
 
   while (NaturalUnits < 0) {
+    //
     // Add natural indexes (1000b) into our stack tracker
     // Note, we don't care if the previous entry was aligned as a non 64-bit
     // aligned entry cannot be used as a call parameter in valid EBC code.
     // This also adds the effect of re-aligning our data to 64 bytes, which
     // will help speed up tracking of local stack variables (arrays, etc.)
+    //
     if ((VmPtr->StackTrackerIndex % 4 == 0) && (NaturalUnits <= -4)) {
-      // Optimize adding of a large number of naturals, such as the ones
-      // reserved for local function variables/arrays. 0x55 = 4 naturals.
-      Status = AddStackTrackerBytes (VmPtr, 0x55, -1 * (INTN)(NaturalUnits / 4));
+      //
+      // Optimize adding a large number of naturals, such as ones reserved
+      // for local function variables/arrays. 0x55 means 4 naturals.
+      //
+      Status = AddStackTrackerBytes (VmPtr, 0x55, -NaturalUnits / 4);
       NaturalUnits -= 4 * (NaturalUnits / 4); // Beware of negative modulos
     } else {
-      Status = AddStackTrackerIndex (VmPtr, 0x08);
+      Status = AddStackTrackerEntry (VmPtr, 0x08);
       NaturalUnits++;
     }
     if (EFI_ERROR (Status)) {
@@ -361,35 +382,45 @@ UpdateStackTracker (
   }
 
   if (ConstUnits < 0) {
+    //
     // Add constant indexes (0000b-0111b) into our stack tracker
     // For constants, we do care if the previous entry was aligned to 64 bit
     // since we need to include any existing non aligned indexes into the new
     // set of (constant) indexes we are adding. Thus, if the last index is
     // non zero (non 64-bit aligned) we just delete it and add the value to
     // our constant.
-    LastIndex = GetStackTrackerIndex (VmPtr);
-    if ((LastIndex != 0x00) && (LastIndex != 0x08)) {
-      DelStackTrackerIndex (VmPtr);
-      ConstUnits -= LastIndex;
+    //
+    LastEntry = GetStackTrackerEntry (VmPtr);
+    if ((LastEntry != 0x00) && (LastEntry != 0x08)) {
+      DelStackTrackerEntry (VmPtr);
+      ConstUnits -= LastEntry;
     }
+
+    //
     // Now, add as many 64-bit indexes as we can (0000b values)
+    //
     while (ConstUnits <= -8) {
       if ((ConstUnits <= -32) && (VmPtr->StackTrackerIndex % 4 == 0)) {
-        // Optimize adding of a large number of consts, such as the ones
-        // reserved for local function variables/arrays. 0x00 = 4 64-bit consts.
-        Status = AddStackTrackerBytes (VmPtr, 0x00, -1 * (INTN)(ConstUnits / 32));
+        //
+        // Optimize adding a large number of consts, such as ones reserved
+        // for local function variables/arrays. 0x00 means 4 64-bit consts.
+        //
+        Status = AddStackTrackerBytes (VmPtr, 0x00, -ConstUnits / 32);
         ConstUnits -= 32 * (ConstUnits / 32); // Beware of negative modulos
       } else {
-        Status = AddStackTrackerIndex (VmPtr, 0x00);
+        Status = AddStackTrackerEntry (VmPtr, 0x00);
         ConstUnits += 8;
       }
       if (EFI_ERROR (Status)) {
         return Status;
       }
     }
+
+    //
     // Add any remaining non 64-bit aligned bytes
+    //
     if (ConstUnits % 8) {
-      Status = AddStackTrackerIndex (VmPtr, (-ConstUnits) % 8);
+      Status = AddStackTrackerEntry (VmPtr, (-ConstUnits) % 8);
       if (EFI_ERROR (Status)) {
         return Status;
       }
@@ -397,42 +428,86 @@ UpdateStackTracker (
   }
 
   while ((NaturalUnits > 0) || (ConstUnits > 0)) {
+    ASSERT(VmPtr->StackTrackerIndex > 0);
+
+    //
     // Delete natural/constant items from the stack tracker
-    LastIndex = GetStackTrackerIndex (VmPtr);
-    Status = DelStackTrackerIndex (VmPtr);
+    //
+    if (VmPtr->StackTrackerIndex % 4 == 0) {
+      //
+      // Speedup deletion for blocks of naturals/consts
+      //
+      while ((ConstUnits >= 32) &&
+            (VmPtr->StackTracker[(VmPtr->StackTrackerIndex-1) % 4] == 0x00)) {
+        //
+        // Start with consts since that's what we add last
+        //
+        VmPtr->StackTrackerIndex -= 32;
+        ConstUnits -= 32;
+      }
+      while ((NaturalUnits >= 4) &&
+            (VmPtr->StackTracker[(VmPtr->StackTrackerIndex-1) % 4] == 0x55)) {
+        VmPtr->StackTrackerIndex -= 4;
+        NaturalUnits -= 4;
+      }
+    }
+
+    if ((NaturalUnits == 0) && (ConstUnits == 0)) {
+      //
+      // May already have depleted our values through block processing above
+      //
+      break;
+    }
+
+    LastEntry = GetStackTrackerEntry (VmPtr);
+    Status = DelStackTrackerEntry (VmPtr);
     if (EFI_ERROR (Status)) {
       return Status;
     }
-    if (LastIndex == 0x08) {
+
+    if (LastEntry == 0x08) {
       if (NaturalUnits > 0) {
+        //
         // Remove a natural and move on
+        //
         NaturalUnits--;
         continue;
       }
+      //
       // Got a natural while expecting const which may be the result of a
       // "cloaked" stack operation (eg. R1 <- R0, stack ops on R1, R0 <- R1)
       // which we monitor through the R0 delta converted to const. In this
       // case just remove 4 const for each natural we find in the tracker.
-      LastIndex = 0x04;
+      //
+      LastEntry = 0x04;
     } else if (ConstUnits <= 0) {
-       // Got a const while expecting a natural which may be the result of a
-       // "cloaked" stack operation => Substract 1 natural unit and add 4 to
-       // const units. Note that "cloaked" stack operations cannot break our
-       // tracking as the enqueuing of natural parameters is not something
-       // that can be concealed if one interprets the EBC specs correctly.
-       NaturalUnits--;
-       ConstUnits += 4;
+      //
+      // Got a const while expecting a natural which may be the result of a
+      // "cloaked" stack operation => Substract 1 natural unit and add 4 to
+      // const units. Note that "cloaked" stack operations cannot break our
+      // tracking as the enqueuing of natural parameters is not something
+      // that can be concealed if one interprets the EBC specs correctly.
+      //
+      NaturalUnits--;
+      ConstUnits += 4;
     }
-    if (LastIndex == 0x00) {
-      LastIndex = 0x08;
+
+    if (LastEntry == 0x00) {
+      LastEntry = 0x08;
     }
+    //
     // Remove a set of const bytes
-    if (ConstUnits >= LastIndex) {
-      // Enough const bytes to remove the whole stack tracker entry
-      ConstUnits -= LastIndex;
+    //
+    if (ConstUnits >= LastEntry) {
+      //
+      // Enough const bytes to remove at least one stack tracker entry
+      //
+      ConstUnits -= LastEntry;
     } else {
+      //
       // Not enough const bytes - need to add the remainder back
-      Status = AddStackTrackerIndex (VmPtr, LastIndex - ConstUnits);
+      //
+      Status = AddStackTrackerEntry (VmPtr, LastEntry - ConstUnits);
       ConstUnits = 0;
       if (EFI_ERROR (Status)) {
         return Status;
@@ -442,6 +517,30 @@ UpdateStackTracker (
 
   return EFI_SUCCESS;
 }
+
+/**
+  Update the stack tracker by computing the R0 delta.
+
+  @param VmPtr         The pointer to current VM context.
+  @param NewR0         The new R0 value.
+
+  @retval EFI_OUT_OF_RESOURCES  Not enough memory to grow the stack tracker.
+  @retval EFI_UNSUPPORTED       The stack tracker is being underflown due to
+                                unbalanced stack operations.
+  @retval EFI_SUCCESS           The stack tracker was updated successfully.
+
+**/
+EFI_STATUS
+UpdateStackTrackerFromDelta (
+  IN VM_CONTEXT *VmPtr,
+  IN UINTN      NewR0
+  )
+{
+  // TODO: Check if the new R0 is in the original stack buffer
+
+  return UpdateStackTracker(VmPtr, 0, NewR0 - VmPtr->Gpr[0]);
+}
+
 
 /**
   Begin executing an EBC image.
@@ -507,7 +606,10 @@ EbcInterpret (
   if (VmContext.StackTracker == NULL) {
     return EFI_OUT_OF_RESOURCES;
   }
+
+  //
   // Add tracking for EfiMain() call just in case
+  //
   VmContext.StackTracker[0] = 0x05; // 2 x UINT64, 2 x UINTN
   VmContext.StackTrackerIndex = 4;
 
@@ -515,17 +617,14 @@ EbcInterpret (
   // Initialize the stack pointer for the EBC. Get the current system stack
   // pointer and adjust it down by the max needed for the interpreter.
   //
-
-  //
-  // Adjust the VM's stack pointer down.
-  //
-
   Status = GetEBCStack((EFI_HANDLE)(UINTN)-1, &VmContext.StackPool, &StackIndex);
   if (EFI_ERROR(Status)) {
     return Status;
   }
 
-  // Reserve space at the bottom of the allocated stack for the stack argument tracker
+  //
+  // Adjust the VM's stack pointer down.
+  //
   VmContext.StackTop = (UINT8*)VmContext.StackPool + STACK_REMAIN_SIZE;
   VmContext.Gpr[0] = (UINT32) ((UINT8*)VmContext.StackPool + STACK_POOL_SIZE);
   VmContext.HighStackBottom = (UINTN) VmContext.Gpr[0];
@@ -672,7 +771,10 @@ ExecuteEbcImageEntryPoint (
   if (VmContext.StackTracker == NULL) {
     return EFI_OUT_OF_RESOURCES;
   }
+
+  //
   // Add tracking for EfiMain() call just in case
+  //
   VmContext.StackTracker[0] = 0x05; // 2 x UINT64, 2 x UINTN
   VmContext.StackTrackerIndex = 4;
 
@@ -877,19 +979,27 @@ EbcLLCALLEX (
     ArgLayout = 0;
     for (i = VmPtr->StackTrackerIndex - 4; i <= (VmPtr->StackTrackerIndex - 1); i++) {
       ArgLayout <<= 1;
-      if ((i / 4) < 0) // We may attempt to read before the stack, which is ok
+      if ((i / 4) < 0) {
+        //
+        // We may attempt to read before our stack, which is ok
+        //
         continue;
+      }
+
+      //
       // NB: There's little point in trying to detect dual 2-bit sequences
       // here (used for stack tracked values that aren't natural or 64-bit)
       // even if they could be used to detect the end of function parameters.
       // Since those can't apply to actual function parameters (unless the
       // EBC code is in breach of the specs), it won't matter if we attempt
       // to process them.
+      //
       if (VmPtr->StackTracker[i / 4] & (1 << (2 * (3 - (i % 4)))))
         ArgLayout |= 1;
     }
 
-	// TODO: validate each sequence
+    // TODO: validate each sequence
+    //
     // At this stage, ArgLayout is one of the following
     // Arg# =  3  2  1  0
     // 0000b (64/64/64/64) -> ok
@@ -908,17 +1018,18 @@ EbcLLCALLEX (
     // 1101b (Nl/Nl/64/Nl) -> padding needed for arg0 @ dword #0
     // 1110b (Nl/Nl/Nl/64) -> ok
     // 1111b (Nl/Nl/Nl/Nl) -> ok
-    if ((ArgLayout == 0x07) || ((ArgLayout & 0x07) == 0x02))
-      Padding = 3; // dword # to be zeroed
-    else if ((ArgLayout & 0x03) == 0x01)
-      Padding = 1; // dword # to be zeroed
+    //
+    if ((ArgLayout == 0x07) || ((ArgLayout & 0x07) == 0x02)) {
+      Padding = 3;
+    } else if ((ArgLayout & 0x03) == 0x01) {
+      Padding = 1;
+    }
 
-    // Padding is only needed if this actually belongs to stacked data
-    if ((UINTN) &ArgPtr[Padding] > (UINTN) FramePtr)
-      Padding = 0;
+    //
     // Since we have at most one arg we need to shift, just shift the whole
     // stack 4 bytes left, up to our argument, and then fill a zero in.
     // TODO: Don't modify the stack - pad the registers in the assembly instead
+    //
     if (Padding) {
       // Preserve the bytes we are about to override
       BackupData = ArgPtr[-1];
