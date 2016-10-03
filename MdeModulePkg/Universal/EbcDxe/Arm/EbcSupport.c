@@ -218,7 +218,7 @@ AddStackTrackerEntry (
     }
 
     //
-    // Ensure that we clear bits we don't use yet
+    // Clear bits and add our value
     //
     VmPtr->StackTracker[VmPtr->StackTrackerIndex / 4] &=
           0xFC << (6 - 2 * (VmPtr->StackTrackerIndex % 4));
@@ -522,7 +522,7 @@ UpdateStackTracker (
   Update the stack tracker by computing the R0 delta.
 
   @param VmPtr         The pointer to current VM context.
-  @param NewR0         The new R0 value.
+  @param UpdatedR0     The new R0 value.
 
   @retval EFI_OUT_OF_RESOURCES  Not enough memory to grow the stack tracker.
   @retval EFI_UNSUPPORTED       The stack tracker is being underflown due to
@@ -533,12 +533,53 @@ UpdateStackTracker (
 EFI_STATUS
 UpdateStackTrackerFromDelta (
   IN VM_CONTEXT *VmPtr,
-  IN UINTN      NewR0
+  IN UINTN      UpdatedR0
   )
 {
-  // TODO: Check if the new R0 is in the original stack buffer
+  INTN StackPointerDelta;
 
-  return UpdateStackTracker(VmPtr, 0, NewR0 - VmPtr->Gpr[0]);
+  //
+  // Check if the updated R0 is still in our original stack buffer.
+  //
+  if ((VmPtr->OrgStackTrackerIndex == 0) && ((UpdatedR0 < (UINTN) VmPtr->StackPool) ||
+      (UpdatedR0 >= (UINTN) VmPtr->StackPool + STACK_POOL_SIZE))) {
+    //
+    // We are swicthing from the default stack buffer to a newly allocated
+    // one. Keep track of our current stack tracker index in case we come
+    // back to the original stack with unbalanced stack ops (e.g.
+    // SP <- New stack; Enqueue data without dequeuing; SP <- Old SP)
+    // Note that, since we are not moinitoring memory allocations, we can
+    // only ever detect swicthing in and out of the default stack buffer.
+    //
+    VmPtr->OrgStackTrackerIndex = VmPtr->StackTrackerIndex;
+    VmPtr->OrgStackPointer = (UINTN) VmPtr->Gpr[0];
+
+    //
+    // Do not track switching. Just realign the index.
+    //
+    VmPtr->StackTrackerIndex = 4 * ((VmPtr->StackTrackerIndex + 3) / 4);
+    return EFI_SUCCESS;
+  }
+
+  if ((VmPtr->OrgStackTrackerIndex != 0) && ((UpdatedR0 >= (UINTN) VmPtr->StackPool) ||
+      (UpdatedR0 < (UINTN) VmPtr->StackPool + STACK_POOL_SIZE))) {
+    //
+    // Coming back from a newly allocated stack to the original one
+    // As we don't expect stack ops to have been properly balanced we just
+    // restore the old stack tracker index.
+    //
+    VmPtr->StackTrackerIndex = VmPtr->OrgStackTrackerIndex;
+    VmPtr->OrgStackTrackerIndex = 0;
+    //
+    // There's also no guarantee that the new R0 is being restored to the
+    // value it held when stwiching stacks, so we use the value R0 held
+    // at the time the switch was performed, to compute the delta.
+    StackPointerDelta = UpdatedR0 - VmPtr->OrgStackPointer;
+  } else {
+    StackPointerDelta = UpdatedR0 - (UINTN) VmPtr->Gpr[0];
+  }
+
+  return UpdateStackTracker(VmPtr, 0, StackPointerDelta);
 }
 
 

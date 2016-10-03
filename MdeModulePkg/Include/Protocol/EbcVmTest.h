@@ -66,6 +66,8 @@ typedef struct {
   UINT8             *StackTracker;           ///< workaround for Arm register parameter enqueueing
   INTN              StackTrackerSize;        ///< size of the stack tracker buffer, in bytes
   INTN              StackTrackerIndex;       ///< current stack tracker index, in 1/4th bytes
+  INTN              OrgStackTrackerIndex;    ///< copy of the index, used on stack buffer switch
+  UINTN             OrgStackPointer;         ///< copy of the stack pointer, used on stack buffer switch
 #endif
 } VM_CONTEXT;
 
