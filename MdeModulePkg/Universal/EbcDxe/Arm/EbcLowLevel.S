@@ -23,6 +23,7 @@
 ASM_GLOBAL ASM_PFX(EbcLLCALLEXNative)
 ASM_GLOBAL ASM_PFX(EbcLLEbcInterpret)
 ASM_GLOBAL ASM_PFX(EbcLLExecuteEbcImageEntryPoint)
+ASM_GLOBAL ASM_PFX(CopyMem);
 
 INTERWORK_FUNC(EbcLLCALLEXNative)
 INTERWORK_FUNC(EbcLLEbcInterpret)
@@ -35,61 +36,59 @@ ASM_GLOBAL ASM_PFX(mEbcInstructionBufferTemplate)
 //
 // This function is called to execute an EBC CALLEX instruction.
 // This instruction requires that we thunk out to external native
-// code. For ARM, we copy the VM stack into the main stack and then pop
-// the first 4 arguments off according to the ARM Procedure Call Standard
-// On return, we restore the stack pointer to its original location.
+// code. For ARM, we copy the first VM stack arguments into registers,
+// according to the ARM Procedure Call Standard, possibly padding one
+// of the r1 or r3 registers as needed. Then depending on whether there
+// exist any potential arguments left, we either perform a tail call,
+// or we copy the remaining arguments into the main stack, call, and
+// then restore the stack pointer to its original location.
 //
 //****************************************************************************
 // UINTN EbcLLCALLEXNative(UINTN FuncAddr, UINTN NewStackPointer, VOID *FramePtr)
 ASM_PFX(EbcLLCALLEXNative):
-    mov     ip, r0                  // Preserve r0
 
-    //
-    // If the EBC stack frame is smaller than or equal to 16 bytes, we know there
-    // are no stacked arguments #5 and beyond that we need to copy to the native
-    // stack. In this case, we can perform a tail call which is much more
-    // efficient, since there is no need to touch the native stack at all.
-    //
-    sub     r3, r2, r1              // Length = NewStackPointer - FramePtr
-    cmp     r3, #16
-    bgt     0f
+    and     r3, r1, #0x3            // Isolate padding value into r3 and
+    and     r1, r1, #0xfffffffc     // realign NewStackPointer to 32-bit
+    mov     ip, r1                  // Use ip as our argument walker
+    push    {r0, r4}                // Preserve r0, r4
+    mov     r4, r2                  // Keep a copy of FramePtr
 
-    ldrd    r2, r3, [r1, #8]
-    ldrd    r0, r1, [r1]
-
+    ldr     r0, [ip], #4            // fill in r0 argument
+    cmp     r3, #1                  // fill in or pad r1 as needed
+    beq     0f
+    ldr     r1, [ip], #4
+    b       1f
+0:  mov     r1, #0
+1:  ldr     r2, [ip], #4            // fill in r2 argument
+    cmp     r3, #3                  // fill in or pad r3 as needed
+    beq     0f
+    ldr     r3, [ip], #4
+    b       1f
+0:  mov     r3, #0
+1:  subs    r4, r4, ip              // Space required for non-register args
+    bgt     0f                      // More args?
+    pop     {ip}                    // No => perform a tail call
+    pop     {r4}
     bx      ip
 
-    //
-    // More than 16 bytes: we need to build the full native stack frame and copy
-    // the part of the VM stack exceeding 16 bytes (which may contain stacked
-    // arguments) to the native stack
-    //
-0:  push    {r4, lr}
-    mov     r4, sp
-
-    //
-    // Ensure that the stack pointer remains 8 byte aligned,
-    // even if the size of the VM stack frame is not a multiple of 8
-    //
-    add     r1, r1, #16             // Skip over [potential] reg params
-    tst     r3, #7                  // Multiple of 8?
-    beq     1f
-    ldr     r3, [r2, #-4]!          // No? Then push one word
-    str     r3, [sp, #-8]!          // ... but use two slots
-    b       2f
-
-1:  ldrd    r0, r3, [r2, #-8]!
-    strd    r0, r3, [sp, #-8]!
-2:  cmp     r2, r1
-    bgt     1b
-
-    ldrd    r2, r3, [r1, #-8]
-    ldrd    r0, r1, [r1, #-16]
-
+0:  push    {r5, lr}                // Yes => copy to stack
+    mov     r5, sp                  // Preserve original sp
+    push    {r0-r3}                 // Preserve our already filled register arguments
+    sub     sp, sp, r4              // Allocate required space on the native stack
+    mov     r0, sp
+    and     r0, r0, #0xfffffff8     // Ensure that the stack pointer is 8 byte aligned
+    mov     sp, r0
+    mov     r1, ip
+    mov     r2, r4
+    bl      ASM_PFX(CopyMem)        // Duplicate stack args
+    ldrd    r0, r1, [r5, #-16]      // Restore r0-r4 from what we pushed earlier
+    ldrd    r2, r3, [r5, #-8]
+    ldr     ip, [r5, #8]            // Set the target address in ip
     blx     ip
-
-    mov     sp, r4
-    pop     {r4, pc}
+    mov     sp, r5                  // Restore the stack, dequeue and return
+    pop     {r5, ip}
+    pop     {r3, r4}                // Destack with r3, as r0 may contain a return value
+    mov     pc, ip
 
 //****************************************************************************
 // EbcLLEbcInterpret

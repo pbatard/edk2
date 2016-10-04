@@ -968,9 +968,8 @@ EbcLLCALLEX (
   )
 {
   CONST EBC_INSTRUCTION_BUFFER *InstructionBuffer;
-  UINT32 BackupData, *ArgPtr = (UINT32*) NewStackPointer;
   UINT8 ArgLayout;
-  INTN i, Padding = 0;
+  INTN i;
 
   //
   // Processor specific code to check whether the callee is a thunk to EBC.
@@ -1006,42 +1005,48 @@ EbcLLCALLEX (
     // parameter in Arg1, then we must pad the first parameter to 64 bit, so
     // that Arg1 start at register r2.
     //
-    // This is where our stack tracker comes into play, which tracks EBC stack
+    // This is where our stack tracker comes into play, as it tracks EBC stack
     // manipulations and allows us to find whether each of the (potential)
-    // arguments being passed to a native CALLEX is 64-bit or a natural (since
-    // are the ONLY two types of arguments that can be passed to a native
-    // call, as per the UEFI/EBC specs).
+    // arguments being passed to a native CALLEX is 64-bit or a natural. As
+    // a reminder, and as per the specs (UEFI 2.6, section 21.9.3), 64-bit
+    // or natural are the ONLY two types of arguments that are allowed to
+    // be passed when performing a function call from EBC, even if it happens
+    // to be a native one (in which case any <= 32-bit argument must be
+    // stacked as a natural.
     //
-    // Using the stack tarcker, we can retreive the last 4 argument types
-    // (encode as 2 bit sequences), which we convert to a 4-bit value (with 
-    // each bit set for natural, cleared for 64-bit) that provides us with
-    // an argument layout we can use to determine where padding is needed.
+    // Using the stack tracker, we can retreive the last 4 argument types
+    // (encoded as 2 bit sequences), which we convert to a 4-bit value
+    // that gives us the argument layout. Using this layout we can find out
+    // if any of the Arm argument registers requires padding.
     //
     ArgLayout = 0;
     for (i = VmPtr->StackTrackerIndex - 4; i <= (VmPtr->StackTrackerIndex - 1); i++) {
       ArgLayout <<= 1;
       if ((i / 4) < 0) {
-        //
-        // We may attempt to read before our stack, which is ok
-        //
         continue;
       }
 
       //
-      // NB: There's little point in trying to detect dual 2-bit sequences
-      // here (used for stack tracked values that aren't natural or 64-bit)
-      // even if they could be used to detect the end of function parameters.
-      // Since those can't apply to actual function parameters (unless the
-      // EBC code is in breach of the specs), it won't matter if we attempt
-      // to process them.
+      // Actual parameters will be stored as 2 bit sequences, with 0 as the
+      // msb and a 0 lsb for 64-bit values or a 1 lsb for natural values.
+      // Also, since there's little point in avoiding to process dual 2-bit
+      // sequences (for stack values that aren't natural or 64-bit, and thus
+      // can't be used as params) we also treat them as if they were 2-bit.
       //
       if (VmPtr->StackTracker[i / 4] & (1 << (2 * (3 - (i % 4)))))
         ArgLayout |= 1;
     }
 
-    // TODO: validate each sequence
     //
-    // At this stage, ArgLayout is one of the following
+    // We'll use the fact that the NewStackPointer is 32-bit aligned to tell
+    // the assembly which arg register needs to be padded through the lower
+    // 2 bits. This avoids having to modify the function declaration just
+    // for Arm. This does warrant an ASSERT, to be on the safe side.
+    //
+    ASSERT((NewStackPointer & 0x03) == 0);
+
+    //
+    // At this stage, ArgLayout is one of the following:
     // Arg# =  3  2  1  0
     // 0000b (64/64/64/64) -> ok
     // 0001b (64/64/64/Nl) -> padding needed for arg0 @ dword #0
@@ -1061,22 +1066,9 @@ EbcLLCALLEX (
     // 1111b (Nl/Nl/Nl/Nl) -> ok
     //
     if ((ArgLayout == 0x07) || ((ArgLayout & 0x07) == 0x02)) {
-      Padding = 3;
+      NewStackPointer |= 3; // r3 will need to be padded
     } else if ((ArgLayout & 0x03) == 0x01) {
-      Padding = 1;
-    }
-
-    //
-    // Since we have at most one arg we need to shift, just shift the whole
-    // stack 4 bytes left, up to our argument, and then fill a zero in.
-    // TODO: Don't modify the stack - pad the registers in the assembly instead
-    //
-    if (Padding) {
-      // Preserve the bytes we are about to override
-      BackupData = ArgPtr[-1];
-      for (i = 0; i < Padding; i++)
-        ArgPtr[i - 1] = ArgPtr[i];
-      ArgPtr[i - 1] = 0;
+      NewStackPointer |= 1; // r1 will need to be padded
     }
 
     //
@@ -1086,16 +1078,7 @@ EbcLLCALLEX (
     // stack frame. All we know is that there is an 8 byte gap at the top that
     // we can ignore.
     //
-    VmPtr->Gpr[7] = EbcLLCALLEXNative (FuncAddr,
-        NewStackPointer - (Padding ? 4 : 0), FramePtr - 8);
-
-    // Restore the stack data to its original content
-    if (Padding) {
-      for (i = Padding - 1; i >= 0 ; i--)
-        ArgPtr[i] = ArgPtr[i - 1];
-      // Restore overridden bytes
-      ArgPtr[-1] = BackupData;
-    }
+    VmPtr->Gpr[7] = EbcLLCALLEXNative (FuncAddr, NewStackPointer, FramePtr - 8);
 
     //
     // Advance the IP.
