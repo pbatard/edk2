@@ -3,6 +3,7 @@
 //  This code provides low level routines that support the Virtual Machine
 //  for option ROMs.
 //
+//  Copyright (c) 2016, Pete Batard. All rights reserved.<BR>
 //  Copyright (c) 2016, Linaro, Ltd. All rights reserved.<BR>
 //  Copyright (c) 2015, The Linux Foundation. All rights reserved.<BR>
 //  Copyright (c) 2007 - 2014, Intel Corporation. All rights reserved.<BR>
@@ -20,11 +21,11 @@
     .thumb
     .syntax unified
 
-ASM_GLOBAL ASM_PFX(EbcLLCALLEXNative)
+ASM_GLOBAL ASM_PFX(EbcLLCALLEXNativeArm)
 ASM_GLOBAL ASM_PFX(EbcLLEbcInterpret)
 ASM_GLOBAL ASM_PFX(EbcLLExecuteEbcImageEntryPoint)
 
-INTERWORK_FUNC(EbcLLCALLEXNative)
+INTERWORK_FUNC(EbcLLCALLEXNativeArm)
 INTERWORK_FUNC(EbcLLEbcInterpret)
 INTERWORK_FUNC(EbcLLExecuteEbcImageEntryPoint)
 
@@ -34,62 +35,96 @@ ASM_GLOBAL ASM_PFX(mEbcInstructionBufferTemplate)
 // EbcLLCALLEX
 //
 // This function is called to execute an EBC CALLEX instruction.
-// This instruction requires that we thunk out to external native
-// code. For ARM, we copy the VM stack into the main stack and then pop
-// the first 4 arguments off according to the ARM Procedure Call Standard
-// On return, we restore the stack pointer to its original location.
+// This instruction requires that we thunk out to external native code.
+// Note that due to the ARM Procedure Call Standard, we may have to align
+// 64-bit arguments to an even register or dword aligned stack address,
+// which is what the extra ArgLayout parameter is used for.
+// Also, to optimize for speed, we arbitrarily limit to 16 the maximum
+// number of arguments a native call can have.
 //
 //****************************************************************************
-// UINTN EbcLLCALLEXNative(UINTN FuncAddr, UINTN NewStackPointer, VOID *FramePtr)
-ASM_PFX(EbcLLCALLEXNative):
-    mov     ip, r0                  // Preserve r0
+// UINTN EbcLLCALLEXNativeArm(UINTN FuncAddr, UINTN NewStackPointer,
+//                            VOID *FramePtr, UINT16 ArgLayout)
+ASM_PFX(EbcLLCALLEXNativeArm):
+
+    mov     ip, r1                  // Use ip as our argument walker
+    push    {r0, r4-r6}
+    mov     r4, r2                  // Keep a copy of FramePtr
+    mov     r5, r3                  // Keep a copy of ArgLayout
+    mov     r6, #2                  // Arg counter (2 for r0 and r2)
 
     //
-    // If the EBC stack frame is smaller than or equal to 16 bytes, we know there
-    // are no stacked arguments #5 and beyond that we need to copy to the native
-    // stack. In this case, we can perform a tail call which is much more
-    // efficient, since there is no need to touch the native stack at all.
+    // Process the register arguments, skipping r1 and r3
+    // as needed, according to the argument layout.
     //
-    sub     r3, r2, r1              // Length = NewStackPointer - FramePtr
-    cmp     r3, #16
-    bgt     0f
-
-    ldrd    r2, r3, [r1, #8]
-    ldrd    r0, r1, [r1]
-
+    lsrs    r5, r5, #1
+    bcc     0f                      // Is our next argument 64-bit?
+    ldr     r0, [ip], #4            // Yes => fill in r0-r1
+    ldr     r1, [ip], #4
+    b       1f
+0:  ldr     r0, [ip], #4            // No => fill in r0
+    lsrs    r5, r5, #1
+    bcs     2f                      // Is our next argument 64-bit?
+    ldr     r1, [ip], #4            // No => fill in r1
+    add     r6, r6, #1              // Increment arg counter for r1
+1:  lsrs    r5, r5, #1
+    bcc     0f                      // Is our next argument 64-bit?
+2:  ldr     r2, [ip], #4            // Yes => fill in r2-r3
+    ldr     r3, [ip], #4
+    b       1f
+0:  ldr     r2, [ip], #4            // No => fill in r2
+    tst     r5, #1
+    bne     1f                      // Is our next argument 64-bit?
+    ldr     r3, [ip], #4            // No => fill in r3
+    lsr     r5, r5, #1
+    add     r6, r6, #1              // Increment arg counter for r3
+1:  cmp     r4, ip
+    bgt     0f                      // More args?
+    pop     {ip}                    // No => perform a tail call
+    pop     {r4-r6}
     bx      ip
 
     //
-    // More than 16 bytes: we need to build the full native stack frame and copy
-    // the part of the VM stack exceeding 16 bytes (which may contain stacked
-    // arguments) to the native stack
+    // Cannot perform a tail call => We need to properly enqueue (and
+    // align) all EBC stack parameters before we invoke the native call.
     //
-0:  push    {r4, lr}
-    mov     r4, sp
+0:  push    {r7-r10, lr}
+    mov     r10, sp                 // Preserve original sp
+    sub     r7, r10, #116           // Space for 14 64-bit args (+1 word)
+    and     r7, r7, #0xfffffff8     // Start with an aligned stack
+    mov     sp, r7
 
     //
-    // Ensure that the stack pointer remains 8 byte aligned,
-    // even if the size of the VM stack frame is not a multiple of 8
+    // Duplicate EBC data onto the local stack:
+    // ip = EBC arg walker
+    // r4 = top of EBC stack frame
+    // r5 = arg layout
+    // r6 = arg counter
+    // r7 = local stack pointer
     //
-    add     r1, r1, #16             // Skip over [potential] reg params
-    tst     r3, #7                  // Multiple of 8?
-    beq     1f
-    ldr     r3, [r2, #-4]!          // No? Then push one word
-    str     r3, [sp, #-8]!          // ... but use two slots
+0:  add     r6, r6, #1              // Increment the arg counter
+    lsrs    r5, r5, #1
+    bcs     1f                      // Is the current argument 64 bit?
+    ldr     r8, [ip], #4            // No? Then just copy it onstack
+    str     r8, [r7], #4
     b       2f
+1:  tst     r7, #7                  // Yes. Is SP aligned to 8 bytes?
+    beq     1f
+    add     r7, r7, #4              // No? Realign.
+1:  ldr     r8, [ip], #4            // EBC stack may not be aligned for ldrd...
+    ldr     r9, [ip], #4
+    strd    r8, r9, [r7], #8        // ...but the local stack is.
+2:  cmp     r6, #16                 // More than 16 arguments processed?
+    bge     0f
+    cmp     r4, ip                  // Reached the top of the EBC stack frame?
+    bgt     0b
 
-1:  ldrd    r0, r3, [r2, #-8]!
-    strd    r0, r3, [sp, #-8]!
-2:  cmp     r2, r1
-    bgt     1b
-
-    ldrd    r2, r3, [r1, #-8]
-    ldrd    r0, r1, [r1, #-16]
-
+0:  ldr     ip, [r10, #20]          // Set the target address in ip
     blx     ip
-
-    mov     sp, r4
-    pop     {r4, pc}
+    mov     sp, r10                 // Restore the stack, dequeue and return
+    pop     {r7-r10, ip}
+    pop     {r3, r4-r6}             // Destack with r3, as r0 may contain a return value
+    mov     pc, ip
 
 //****************************************************************************
 // EbcLLEbcInterpret
