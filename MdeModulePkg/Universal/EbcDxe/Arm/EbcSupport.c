@@ -69,6 +69,30 @@ EbcLLExecuteEbcImageEntryPoint (
   );
 
 /**
+  This function is called to execute an EBC CALLEX instruction.
+  This is a special version of EbcLLCALLEXNative for Arm as we
+  need to pad or align arguments depending on whether they are
+  64-bit or natural.
+
+  @param  CallAddr     The function address.
+  @param  EbcSp        The new EBC stack pointer.
+  @param  FramePtr     The frame pointer.
+  @param  ArgLayout    The layout for up to 32 arguments. 1 means
+                       the argument is 64-bit, 0 means natural.
+
+  @return The unmodified value returned by the native code.
+
+**/
+INT64
+EFIAPI
+EbcLLCALLEXNativeArm (
+  IN UINTN        CallAddr,
+  IN UINTN        EbcSp,
+  IN VOID         *FramePtr,
+  IN UINT16       ArgLayout
+  );
+
+/**
   Pushes a 32 bit unsigned value to the VM stack.
 
   @param VmPtr  The pointer to current VM context.
@@ -934,7 +958,7 @@ EbcLLCALLEX (
   )
 {
   CONST EBC_INSTRUCTION_BUFFER *InstructionBuffer;
-  UINT8 ArgLayout;
+  UINT16 ArgLayout, Mask;
   INTN i;
 
   //
@@ -965,11 +989,13 @@ EbcLLCALLEX (
     // 64-bit arguments are stacked as parameters for a native call, we risk
     // running afoul of the AAPCS (the ARM calling convention) which mandates
     // that the first 2 to 4 arguments are passed as register, and that any
-    // 64-bit argument *MUST* start on r0 or r2.
+    // 64-bit argument *MUST* start either on an even register or at an 8-byte
+    // aligned address.
     //
     // So if, say, we have a natural parameter (32-bit) in Arg0 and a 64-bit
     // parameter in Arg1, then we must pad the first parameter to 64 bit, so
-    // that Arg1 start at register r2.
+    // that Arg1 start at register r2. And a similar thing must also happen
+    // with stack parameters.
     //
     // This is where our stack tracker comes into play, as it tracks EBC stack
     // manipulations and allows us to find whether each of the (potential)
@@ -980,61 +1006,30 @@ EbcLLCALLEX (
     // to be a native one (in which case any <= 32-bit argument must be
     // stacked as a natural.
     //
-    // Using the stack tracker, we can retreive the last 4 argument types
-    // (encoded as 2 bit sequences), which we convert to a 4-bit value
-    // that gives us the argument layout. Using this layout we can find out
-    // if any of the Arm argument registers requires padding.
+    // Using the stack tracker, we retreive the last 32 argument types
+    // (decoded from the 2 bit sequences), which we convert to a 32-bit value
+    // that gives us the argument layout. Using this layout we can then find
+    // out where padding is required
     //
     ArgLayout = 0;
-    for (i = VmPtr->StackTrackerIndex - 4; i <= (VmPtr->StackTrackerIndex - 1); i++) {
-      ArgLayout <<= 1;
+    Mask = 1;
+    for (i = VmPtr->StackTrackerIndex - 1; i >= VmPtr->StackTrackerIndex - 16; i--) {
       if ((i / 4) < 0) {
-        continue;
+        break; // Don't underflow the tracker.
       }
-
       //
-      // Actual parameters will be stored as 2 bit sequences, with 0 as the
-      // msb and a 0 lsb for 64-bit values or a 1 lsb for natural values.
-      // Also, since there's little point in avoiding to process dual 2-bit
+      // Actual function parameters are stored as 2 bit sequences in our
+      // tracker, with 00b indicating a 64-bit parameter and 01b a natural.
+      // When converting this to ArgLayout, we set the relevant arg position
+      // bit to 1, for a 64-bit arg, or 0, for a natural.
+      // Also, since there's little point in avoiding to process 4-bit
       // sequences (for stack values that aren't natural or 64-bit, and thus
-      // can't be used as params) we also treat them as if they were 2-bit.
+      // can't be used as call parameters) we just process them as 2-bit.
       //
-      if (VmPtr->StackTracker[i / 4] & (1 << (2 * (3 - (i % 4)))))
-        ArgLayout |= 1;
-    }
-
-    //
-    // We'll use the fact that the NewStackPointer is 32-bit aligned to tell
-    // the assembly which arg register needs to be padded through the lower
-    // 2 bits. This avoids having to modify the function declaration just
-    // for Arm. This does warrant an ASSERT, to be on the safe side.
-    //
-    ASSERT((NewStackPointer & 0x03) == 0);
-
-    //
-    // At this stage, ArgLayout is one of the following:
-    // Arg# =  3  2  1  0
-    // 0000b (64/64/64/64) -> ok
-    // 0001b (64/64/64/Nl) -> padding needed for arg0 @ dword #0
-    // 0010b (64/64/Nl/64) -> padding needed for arg1 @ dword #2
-    // 0011b (64/64/Nl/Nl) -> ok
-    // 0100b (64/Nl/64/64) -> ok
-    // 0101b (64/Nl/64/Nl) -> padding needed for arg0 @ dword #0
-    // 0110b (64/Nl/Nl/64) -> ok
-    // 0111b (64/Nl/Nl/Nl) -> padding needed for arg2 @ dword #2 (yes, #2)
-    // 1000b (Nl/64/64/64) -> ok
-    // 1001b (Nl/64/64/Nl) -> padding needed for arg0 @ dword #0
-    // 1010b (Nl/64/Nl/64) -> padding needed for arg1 @ dword #2
-    // 1011b (Nl/64/Nl/Nl) -> ok
-    // 1100b (Nl/Nl/64/64) -> ok
-    // 1101b (Nl/Nl/64/Nl) -> padding needed for arg0 @ dword #0
-    // 1110b (Nl/Nl/Nl/64) -> ok
-    // 1111b (Nl/Nl/Nl/Nl) -> ok
-    //
-    if ((ArgLayout == 0x07) || ((ArgLayout & 0x07) == 0x02)) {
-      NewStackPointer |= 3; // r3 will need to be padded
-    } else if ((ArgLayout & 0x03) == 0x01) {
-      NewStackPointer |= 1; // r1 will need to be padded
+      if ((VmPtr->StackTracker[i / 4] & (1 << (2 * (3 - (i % 4))))) == 0) {
+        ArgLayout |= Mask;
+      }
+      Mask <<= 1;
     }
 
     //
@@ -1044,7 +1039,8 @@ EbcLLCALLEX (
     // stack frame. All we know is that there is an 8 byte gap at the top that
     // we can ignore.
     //
-    VmPtr->Gpr[7] = EbcLLCALLEXNative (FuncAddr, NewStackPointer, FramePtr - 8);
+    VmPtr->Gpr[7] = EbcLLCALLEXNativeArm (FuncAddr, NewStackPointer,
+          FramePtr - 8, ArgLayout);
 
     //
     // Advance the IP.
