@@ -15,6 +15,7 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 
 #include "EbcInt.h"
 #include "EbcExecute.h"
+#include "EbcDebuggerHook.h"
 
 //
 // NOTE: This is the stack size allocated for the interpreter
@@ -332,6 +333,9 @@ EbcInterpret (
   //
   // Begin executing the EBC code
   //
+  EFI_EBC_DEBUGGER_CODE (
+    EbcDebuggerHookEbcInterpret (&VmContext);
+  )
   EbcExecute (&VmContext);
 
   //
@@ -432,6 +436,9 @@ ExecuteEbcImageEntryPoint (
   //
   // Begin executing the EBC code
   //
+  EFI_EBC_DEBUGGER_CODE (
+    EbcDebuggerHookExecuteEbcImageEntryPoint (&VmContext);
+  )
   EbcExecute (&VmContext);
 
   //
