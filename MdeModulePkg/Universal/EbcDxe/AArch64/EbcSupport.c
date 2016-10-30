@@ -18,6 +18,7 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 
 #include "EbcInt.h"
 #include "EbcExecute.h"
+#include "EbcDebuggerHook.h"
 
 //
 // Amount of space that is not used in the stack
@@ -225,6 +226,9 @@ EbcInterpret (
   //
   // Begin executing the EBC code
   //
+  EFI_EBC_DEBUGGER_CODE (
+    EbcDebuggerHookEbcInterpret (&VmContext);
+  )
   EbcExecute (&VmContext);
 
   //
@@ -336,6 +340,9 @@ ExecuteEbcImageEntryPoint (
   //
   // Begin executing the EBC code
   //
+  EFI_EBC_DEBUGGER_CODE (
+    EbcDebuggerHookExecuteEbcImageEntryPoint (&VmContext);
+  )
   EbcExecute (&VmContext);
 
   //
