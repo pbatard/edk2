@@ -41,10 +41,12 @@ LXtoi (
   CHAR16  *str
   );
 
+#ifndef _GNU_EFI
 UINTN
 Atoi (
   CHAR16  *str
   );
+#endif
 
 UINTN
 AsciiXtoi (
@@ -62,11 +64,13 @@ StrCmpUnicodeAndAscii (
   IN CHAR8    *String2
   );
 
+#ifndef _GNU_EFI
 INTN
 StriCmp (
   IN CHAR16   *String,
   IN CHAR16   *String2
   );
+#endif
 
 INTN
 StriCmpUnicodeAndAscii (
@@ -80,10 +84,12 @@ StrEndWith (
   IN CHAR16                       *SubStr
   );
 
+#ifndef _GNU_EFI
 CHAR16 *
 StrDuplicate (
   IN CHAR16   *Src
   );
+#endif
 
 CHAR16 *
 StrGetNewTokenLine (
@@ -169,12 +175,14 @@ SetPageBreak (
   );
 
 UINTN
+EFIAPI
 EDBPrint (
   IN CONST CHAR16  *Format,
   ...
   );
 
 UINTN
+EFIAPI
 EDBSPrint (
   OUT CHAR16        *Buffer,
   IN  INTN          BufferSize,
@@ -183,6 +191,7 @@ EDBSPrint (
   );
 
 UINTN
+EFIAPI
 EDBSPrintWithOffset (
   OUT CHAR16        *Buffer,
   IN  INTN          BufferSize,

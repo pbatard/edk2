@@ -633,6 +633,7 @@ SetPageBreak (
 }
 
 UINTN
+EFIAPI
 EDBPrint (
   IN CONST CHAR16  *Format,
   ...
@@ -657,6 +658,7 @@ EDBPrint (
 }
 
 UINTN
+EFIAPI
 EDBSPrint (
   OUT CHAR16        *Buffer,
   IN  INTN          BufferSize,
@@ -677,6 +679,7 @@ EDBSPrint (
 }
 
 UINTN
+EFIAPI
 EDBSPrintWithOffset (
   OUT CHAR16        *Buffer,
   IN  INTN          BufferSize,

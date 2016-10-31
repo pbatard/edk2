@@ -19,17 +19,21 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 
 #include <Uefi.h>
 
+#ifndef _GNU_EFI
 #include <Protocol/DebugSupport.h>
 #include <Protocol/Ebc.h>
+#endif
 #include <Protocol/EbcVmTest.h>
 #include <Protocol/EbcSimpleDebugger.h>
 
+#ifndef _GNU_EFI
 #include <Library/BaseLib.h>
 #include <Library/DebugLib.h>
 #include <Library/UefiDriverEntryPoint.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/MemoryAllocationLib.h>
+#endif
 
 extern VM_CONTEXT                    *mVmPtr;
 

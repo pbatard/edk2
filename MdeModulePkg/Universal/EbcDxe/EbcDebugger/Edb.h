@@ -27,8 +27,8 @@ Abstract:
 #include "EbcInt.h"
 #include "EbcExecute.h"
 
-#define EBC_DEBUGGER_MAJOR_VERSION   0
-#define EBC_DEBUGGER_MINOR_VERSION   21
+#define EBC_DEBUGGER_MAJOR_VERSION   1
+#define EBC_DEBUGGER_MINOR_VERSION   1
 
 #define EFI_DEBUG_RETURN    1
 #define EFI_DEBUG_BREAK     2

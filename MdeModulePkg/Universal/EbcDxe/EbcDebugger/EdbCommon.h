@@ -22,6 +22,8 @@ Abstract:
 #define _EFI_EDB_COMMON_H_
 
 #include <Uefi.h>
+
+#ifndef _GNU_EFI
 #include <Library/UefiLib.h>
 #include <Library/PrintLib.h>
 #include <Library/UefiBootServicesTableLib.h>
@@ -32,6 +34,9 @@ Abstract:
 #include <Guid/FileSystemInfo.h>
 #include <Guid/FileSystemVolumeLabelInfo.h>
 #include <Guid/DebugImageInfoTable.h>
+#else
+#include <PrintLib.h>
+#endif
 
 typedef UINTN EFI_DEBUG_STATUS;
 

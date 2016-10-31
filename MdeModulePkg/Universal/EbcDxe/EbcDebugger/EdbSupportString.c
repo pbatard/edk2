@@ -159,6 +159,7 @@ Returns:
   return u;
 }
 
+#ifndef _GNU_EFI
 UINTN
 Atoi (
   CHAR16  *str
@@ -213,6 +214,7 @@ Returns:
 
   return u;
 }
+#endif
 
 UINTN
 AsciiXtoi (
@@ -390,6 +392,7 @@ Returns:
   return (*String - (CHAR16)*String2);
 }
 
+#ifndef _GNU_EFI
 INTN
 StriCmp (
   IN CHAR16   *String,
@@ -419,6 +422,7 @@ Returns:
 
   return UnicodeToUpper (*String) - UnicodeToUpper (*String2);
 }
+#endif
 
 INTN
 StriCmpUnicodeAndAscii (
@@ -482,6 +486,7 @@ Routine Description:
   }
 }
 
+#ifndef _GNU_EFI
 CHAR16 *
 StrDuplicate (
   IN CHAR16   *Src
@@ -498,7 +503,7 @@ StrDuplicate (
   }
   return Dest;
 }
-
+#endif
 
 CHAR16  *mLineBuffer          = NULL;
 CHAR16  *mFieldBuffer         = NULL;

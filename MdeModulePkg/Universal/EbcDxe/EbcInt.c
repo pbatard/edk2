@@ -379,6 +379,10 @@ InitializeEbcDriver (
   EbcProtocol      = NULL;
   EbcDebugProtocol = NULL;
 
+#ifdef _GNU_EFI
+  InitializeLib(ImageHandle, SystemTable);
+#endif
+
   //
   // Allocate memory for our protocol. Then fill in the blanks.
   //
