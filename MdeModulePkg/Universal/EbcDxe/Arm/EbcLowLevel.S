@@ -129,32 +129,26 @@ ASM_PFX(EbcLLCALLEXNativeArm):
 //****************************************************************************
 // EbcLLEbcInterpret
 //
-// This function is called by the thunk code to handle an Native to EBC call
+// This function is called by the thunk code to handle a Native to EBC call
 // This can handle up to 16 arguments (1-4 on in r0-r3, 5-16 are on the stack)
 // ip contains the Entry point that will be the first argument when
 // EBCInterpret is called.
 //
 //****************************************************************************
 ASM_PFX(EbcLLEbcInterpret):
-    .cfi_startproc
-    push    {r4, lr}
-    .cfi_def_cfa_offset     8
-    .cfi_offset             4, -8
-    .cfi_offset             14, -4
+
+    stmdb   sp!, {r4, lr}
 
     // push the entry point and the address of args #5 - #16 onto the stack
     add     r4, sp, #8
-    .cfi_def_cfa_offset     16
-    strd    ip, r4, [sp, #-8]!
+    str     ip, [sp, #-8]!
+    str     r4, [sp, #4]
 
     // call C-code
-    ldr     ip, [ip, #20]
-    blx     ip
+    bl      ASM_PFX(EbcInterpret)
 
     add     sp, sp, #8
-    .cfi_def_cfa_offset     8
-    pop     {r4, pc}
-    .cfi_endproc
+    ldmia   sp!, {r4, pc}
 
 //****************************************************************************
 // EbcLLExecuteEbcImageEntryPoint
