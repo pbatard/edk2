@@ -82,6 +82,10 @@
   ../Ipf/EbcSupport.c
   ../Ipf/EbcLowLevel.s
 
+[Sources.ARM]
+  ../Arm/EbcSupport.c
+  ../Arm/EbcLowLevel.S
+
 [Sources.AARCH64]
   ../AArch64/EbcSupport.c
   ../AArch64/EbcLowLevel.S

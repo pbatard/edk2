@@ -62,6 +62,13 @@ typedef struct {
   UINTN             ImageBase;
   VOID              *StackPool;
   VOID              *StackTop;
+#ifdef MDE_CPU_ARM
+  UINT8             *StackTracker;           ///< workaround for Arm parameter alignment
+  INTN              StackTrackerSize;        ///< size of the stack tracker buffer, in bytes
+  INTN              StackTrackerIndex;       ///< current stack tracker index, in 1/4th bytes
+  INTN              OrgStackTrackerIndex;    ///< copy of the index, used on stack buffer switch
+  UINTN             OrgStackPointer;         ///< copy of the stack pointer, used on stack buffer switch
+#endif
 } VM_CONTEXT;
 
 /**

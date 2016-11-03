@@ -681,7 +681,7 @@ Returns:
   // Remove the matched Object
   //
   for (Index = ObjectIndex; Index < DebuggerPrivate->DebuggerSymbolContext.ObjectCount - 1; Index++) {
-    Object[Index] = Object[Index + 1];
+    CopyMem (&Object[Index], &Object[Index + 1], sizeof(EFI_DEBUGGER_SYMBOL_OBJECT));
   }
   ZeroMem (&Object[Index], sizeof(Object[Index]));
 
