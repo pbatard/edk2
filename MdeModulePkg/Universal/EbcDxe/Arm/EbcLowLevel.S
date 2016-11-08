@@ -130,7 +130,7 @@ ASM_PFX(EbcLLCALLEXNativeArm):
 // EbcLLEbcInterpret
 //
 // This function is called by the thunk code to handle a Native to EBC call
-// This can handle up to 16 arguments (1-4 on in r0-r3, 5-16 are on the stack)
+// This can handle up to 16 arguments (args 1-2/1-4 in r0-r3, rest onstack)
 // ip contains the Entry point that will be the first argument when
 // EBCInterpret is called.
 //
@@ -139,7 +139,7 @@ ASM_PFX(EbcLLEbcInterpret):
 
     stmdb   sp!, {r4, lr}
 
-    // push the entry point and the address of args #5 - #16 onto the stack
+    // push the entry point and the address of non register args on the stack
     add     r4, sp, #8
     str     ip, [sp, #-8]!
     str     r4, [sp, #4]
@@ -181,3 +181,4 @@ ASM_PFX(mEbcInstructionBufferTemplate):
 
     .long   0                       // EBC_ENTRYPOINT_SIGNATURE
 0:  .long   0                       // EBC_LL_EBC_ENTRYPOINT_SIGNATURE
+    .long   0                       // EBC_CALL_SIGNATURE

@@ -1940,6 +1940,7 @@ ExecuteBREAK (
   VOID        *Thunk;
   UINT64      U64EbcEntryPoint;
   INT32       Offset;
+  UINT32      Flags;
 
   Thunk = NULL;
   Operands = GETOPERANDS (VmPtr);
@@ -1996,9 +1997,32 @@ ExecuteBREAK (
     EbcEntryPoint     = (VOID *) (UINTN) U64EbcEntryPoint;
 
     //
+    // A call signature is needed on ARM systems to properly reconstruct
+    // the EBC call parameter stack. It is stored in the lower 16-bits of
+    // R6, with the higher 16-bit of R6 being set to 0xEBCC to confirm
+    // the presence of a valid call signature.
+    // The signature is passed to EbcCreateThunks() as the high 16-bits
+    // of the Flags parameter, with FLAG_THUNK_SIGNATURE also set.
+    // Note that, on ARM, we do allow execution of code where call
+    // signatures are missing (e.g. existing EBC code that has not been
+    // updated to follow the new BREAK 5 requirements) as long as there
+    // aren't any native -> EBC thunk invocations during runtime.
+    // On the other hand, if a native -> EBC thunk invocation is triggered
+    // on an EBC application running on ARM, and a call signature wasn't
+    // registered, the the application will exit with an error (but ONLY
+    // on ARM as it's the only platform that requires signatures for the
+    // time being).
+    //
+    Flags = 0;
+    if (((VmPtr->Gpr[6] >> 48) & 0xFFFF) == EBC_CALL_SIGNATURE) {
+      Flags = (((UINT16) VmPtr->Gpr[6]) << 16) | FLAG_THUNK_SIGNATURE;
+    }
+
+    //
     // Now create a new thunk
     //
-    Status = EbcCreateThunks (VmPtr->ImageHandle, EbcEntryPoint, &Thunk, 0);
+    Status = EbcCreateThunks (VmPtr->ImageHandle, EbcEntryPoint, &Thunk,
+      Flags);
     if (EFI_ERROR (Status)) {
       return Status;
     }

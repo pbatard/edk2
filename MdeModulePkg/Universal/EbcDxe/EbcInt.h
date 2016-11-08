@@ -49,6 +49,11 @@ extern VM_CONTEXT                    *mVmPtr;
 //
 #define FLAG_THUNK_ENTRY_POINT  0x01  // thunk for an image entry point
 #define FLAG_THUNK_PROTOCOL     0x00  // thunk for an EBC protocol service
+#define FLAG_THUNK_SIGNATURE    0x02  // flags include a 16-bit call signature
+//
+// 16-bit call signature indicator
+//
+#define EBC_CALL_SIGNATURE      0xEBCC
 //
 // Put this value at the bottom of the VM's stack gap so we can check it on
 // occasion to make sure the stack has not been corrupted.
