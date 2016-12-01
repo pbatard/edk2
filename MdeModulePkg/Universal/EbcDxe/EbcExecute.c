@@ -1938,6 +1938,8 @@ ExecuteBREAK (
   VOID        *Thunk;
   UINT64      U64EbcEntryPoint;
   INT32       Offset;
+  UINT32      Flags;
+  UINT32      CallSignature;
 
   Thunk = NULL;
   Operands = GETOPERANDS (VmPtr);
@@ -1984,19 +1986,38 @@ ExecuteBREAK (
     break;
 
   //
-  // Create a thunk for EBC code. R7 points to a 32-bit (in a 64-bit slot)
-  // "offset from self" pointer to the EBC entry point.
+  // Create a thunk for EBC code. R7 points to a 64-bit longword, with the
+  // the lower 32 bits being an "offset from self" pointer to the EBC entry
+  // point and the higher 32 bits being the call signature.
   // After we're done, *(UINT64 *)R7 will be the address of the new thunk.
   //
   case 5:
     Offset            = (INT32) VmReadMem32 (VmPtr, (UINTN) VmPtr->Gpr[7]);
+    CallSignature     = VmReadMem32 (VmPtr, (UINTN) VmPtr->Gpr[7] + 4);
     U64EbcEntryPoint  = (UINT64) (VmPtr->Gpr[7] + Offset + 4);
     EbcEntryPoint     = (VOID *) (UINTN) U64EbcEntryPoint;
 
     //
+    // A call signature is needed (notably on ARM systems) to properly
+    // reconstruct the EBC call parameter stack. When BREAK 5 is invoked,
+    // this signature is expected to be provided after the "offset from
+    // self", as another 32-bit word.
+    // Within this word, the upper 16-bits are set to EBC_CALL_SIGNATURE
+    // and the lower 16 bits contain the actual call signature (up to 16
+    // arguments, with bits set to 1 for 64-bit args, 0 otherwise).
+    // This 16-bit signature, if present, is then passed to EbcCreateThunks()
+    // as the high 16-bits of the Flags parameter, along with the
+    // FLAG_THUNK_SIGNATURE bit set.
+    //
+    Flags = 0;
+    if ((CallSignature & 0xFFFF0000) == EBC_CALL_SIGNATURE) {
+      Flags = (CallSignature << 16) | FLAG_THUNK_SIGNATURE;
+    }
+
+    //
     // Now create a new thunk
     //
-    Status = EbcCreateThunks (VmPtr->ImageHandle, EbcEntryPoint, &Thunk, 0);
+    Status = EbcCreateThunks (VmPtr->ImageHandle, EbcEntryPoint, &Thunk, Flags);
     if (EFI_ERROR (Status)) {
       return Status;
     }
