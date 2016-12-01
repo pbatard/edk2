@@ -402,6 +402,11 @@
   MdeModulePkg/Universal/Disk/RamDiskDxe/RamDiskDxe.inf
 
   #
+  # EBC support
+  #
+  MdeModulePkg/Universal/EbcDxe/EbcDxe.inf
+
+  #
   # UEFI application (Shell Embedded Boot Loader)
   #
   ShellPkg/Application/Shell/Shell.inf {
@@ -430,4 +435,3 @@
   # ACPI Support
   #
   MdeModulePkg/Universal/Acpi/AcpiTableDxe/AcpiTableDxe.inf
-  MdeModulePkg/Universal/EbcDxe/EbcDxe.inf
