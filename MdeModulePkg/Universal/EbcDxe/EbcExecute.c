@@ -121,6 +121,49 @@ VmReadIndex64 (
   OUT INT64         *ConstUnitsPtr
   );
 
+#ifdef MDE_CPU_ARM
+/**
+  Update the stack tracker according to the latest natural and constant
+  value stack manipulation operations.
+
+  @param VmPtr         The pointer to current VM context.
+  @param NaturalUnits  The number of natural values that were pushed (>0) or
+                       popped (<0).
+  @param ConstUnits    The number of const bytes that were pushed (>0) or
+                       popped (<0).
+
+  @retval EFI_OUT_OF_RESOURCES  Not enough memory to grow the stack tracker.
+  @retval EFI_UNSUPPORTED       The stack tracker is being underflown due to
+                                unbalanced stack operations.
+  @retval EFI_SUCCESS           The stack tracker was updated successfully.
+
+**/
+EFI_STATUS
+UpdateStackTracker(
+  IN VM_CONTEXT *VmPtr,
+  IN INTN       NaturalUnits,
+  IN INTN       ConstUnits
+  );
+
+/**
+  Update the stack tracker by computing the R0 delta.
+
+  @param VmPtr         The pointer to current VM context.
+  @param NewR0         The new R0 value.
+
+  @retval EFI_OUT_OF_RESOURCES  Not enough memory to grow the stack tracker.
+  @retval EFI_UNSUPPORTED       The stack tracker is being underflown due to
+                                unbalanced stack operations.
+  @retval EFI_SUCCESS           The stack tracker was updated successfully.
+
+**/
+EFI_STATUS
+UpdateStackTrackerFromDelta (
+  IN VM_CONTEXT *VmPtr,
+  IN UINTN      NewR0
+  );
+#endif
+
 /**
   Reads 8-bit data form the memory address.
 
@@ -1508,7 +1551,7 @@ EbcExecute (
       goto Done;
     }
 
-    EbcDebuggerHookExecuteStart (VmPtr);
+      EbcDebuggerHookExecuteStart (VmPtr);
 
     //
     // The EBC VM is a strongly ordered processor, so perform a fence operation before
@@ -1587,6 +1630,11 @@ ExecuteMOVxx (
   UINT64  Data64;
   UINT64  DataMask;
   UINTN   Source;
+#ifdef MDE_CPU_ARM
+  INT64   NaturalUnitsOp2;
+  INT64   ConstUnitsOp2;
+  EFI_STATUS Status;
+#endif
 
   Opcode    = GETOPCODE (VmPtr);
   OpcMasked = (UINT8) (Opcode & OPCODE_M_OPCODE);
@@ -1624,7 +1672,11 @@ ExecuteMOVxx (
       }
 
       if ((Opcode & OPCODE_M_IMMED_OP2) != 0) {
+#ifdef MDE_CPU_ARM
+        Index16     = VmReadIndex16 (VmPtr, Size, &NaturalUnitsOp2, &ConstUnitsOp2);
+#else
         Index16     = VmReadIndex16 (VmPtr, Size, NULL, NULL);
+#endif
         Index64Op2  = (INT64) Index16;
         Size += sizeof (UINT16);
       }
@@ -1639,7 +1691,11 @@ ExecuteMOVxx (
       }
 
       if ((Opcode & OPCODE_M_IMMED_OP2) != 0) {
+#ifdef MDE_CPU_ARM
+        Index32     = VmReadIndex32 (VmPtr, Size, &NaturalUnitsOp2, &ConstUnitsOp2);
+#else
         Index32     = VmReadIndex32 (VmPtr, Size, NULL, NULL);
+#endif
         Index64Op2  = (INT64) Index32;
         Size += sizeof (UINT32);
       }
@@ -1653,7 +1709,11 @@ ExecuteMOVxx (
       }
 
       if ((Opcode & OPCODE_M_IMMED_OP2) != 0) {
+#ifdef MDE_CPU_ARM
+        Index64Op2 = VmReadIndex64 (VmPtr, Size, &NaturalUnitsOp2, &ConstUnitsOp2);
+#else
         Index64Op2 = VmReadIndex64 (VmPtr, Size, NULL, NULL);
+#endif
         Size += sizeof (UINT64);
       }
     } else {
@@ -1766,6 +1826,34 @@ ExecuteMOVxx (
       }
     }
   }
+
+#ifdef MDE_CPU_ARM
+  if ((OPERAND1_REGNUM(Operands) == 0) && (!OPERAND1_INDIRECT(Operands))) {
+    //
+    // The stack pointer (R0) is being directly modified - track it
+    //
+    if ((OPERAND2_REGNUM(Operands) == 0) && (!OPERAND2_INDIRECT(Operands))) {
+      //
+      // MOV R0, R0(+/-n,+/-c)
+      //
+      if (Opcode & OPCODE_M_IMMED_OP2) {
+        Status = UpdateStackTracker (VmPtr, (INTN) NaturalUnitsOp2, (INTN) ConstUnitsOp2);
+        if (EFI_ERROR(Status)) {
+          return Status;
+        }
+      }
+    } else {
+      //
+      // Track the R0 delta
+      //
+      Status = UpdateStackTrackerFromDelta(VmPtr, (INTN) (Data64 & DataMask));
+      if (EFI_ERROR(Status)) {
+        return Status;
+      }
+    }
+  }
+#endif
+
   //
   // Now write it back
   //
@@ -2285,6 +2373,15 @@ ExecuteMOVI (
       Mask64 = (UINT64)~0;
     }
 
+#ifdef MDE_CPU_ARM
+    //
+    // Track direct register operations on R0
+    //
+    if (OPERAND1_REGNUM (Operands) == 0) {
+      UpdateStackTrackerFromDelta(VmPtr, (UINTN) ImmData64 & Mask64);
+    }
+#endif
+
     VmPtr->Gpr[OPERAND1_REGNUM (Operands)] = ImmData64 & Mask64;
   } else {
     //
@@ -2395,6 +2492,15 @@ ExecuteMOVIn (
       return EFI_UNSUPPORTED;
     }
 
+#ifdef MDE_CPU_ARM
+    //
+    // Track direct register operations on R0
+    //
+    if (OPERAND1_REGNUM (Operands) == 0) {
+      UpdateStackTrackerFromDelta(VmPtr, (UINTN) ImmedIndex64);
+    }
+#endif
+
     VmPtr->Gpr[OPERAND1_REGNUM (Operands)] = ImmedIndex64;
   } else {
     //
@@ -2493,6 +2599,15 @@ ExecuteMOVREL (
         );
       return EFI_UNSUPPORTED;
     }
+
+#ifdef MDE_CPU_ARM
+    //
+    // Track direct register operations on R0
+    //
+    if (OPERAND1_REGNUM (Operands) == 0) {
+      UpdateStackTrackerFromDelta(VmPtr, (UINTN) Op2);
+    }
+#endif
 
     VmPtr->Gpr[OPERAND1_REGNUM (Operands)] = (VM_REGISTER) Op2;
   } else {
@@ -2593,6 +2708,14 @@ ExecuteMOVsnw (
   // Now write back the result.
   //
   if (!OPERAND1_INDIRECT (Operands)) {
+#ifdef MDE_CPU_ARM
+    //
+    // Track direct register operations on R0
+    //
+    if (OPERAND1_REGNUM (Operands) == 0) {
+      UpdateStackTrackerFromDelta(VmPtr, (UINTN) Op2);
+    }
+#endif
     VmPtr->Gpr[OPERAND1_REGNUM (Operands)] = Op2;
   } else {
     VmWriteMemN (VmPtr, (UINTN) (VmPtr->Gpr[OPERAND1_REGNUM (Operands)] + Op1Index), (UINTN) Op2);
@@ -2686,6 +2809,14 @@ ExecuteMOVsnd (
   // Now write back the result.
   //
   if (!OPERAND1_INDIRECT (Operands)) {
+#ifdef MDE_CPU_ARM
+    //
+    // Track direct register operations on R0
+    //
+    if (OPERAND1_REGNUM (Operands) == 0) {
+      UpdateStackTrackerFromDelta(VmPtr, (UINTN) Op2);
+    }
+#endif
     VmPtr->Gpr[OPERAND1_REGNUM (Operands)] = Op2;
   } else {
     VmWriteMemN (VmPtr, (UINTN) (VmPtr->Gpr[OPERAND1_REGNUM (Operands)] + Op1Index), (UINTN) Op2);
@@ -2753,6 +2884,9 @@ ExecutePUSHn (
   //
   VmPtr->Gpr[0] -= sizeof (UINTN);
   VmWriteMemN (VmPtr, (UINTN) VmPtr->Gpr[0], DataN);
+#ifdef MDE_CPU_ARM
+  return UpdateStackTracker (VmPtr, -1, 0);
+#endif
   return EFI_SUCCESS;
 }
 
@@ -2829,6 +2963,9 @@ ExecutePUSH (
     VmWriteMem32 (VmPtr, (UINTN) VmPtr->Gpr[0], Data32);
   }
 
+#ifdef MDE_CPU_ARM
+  return UpdateStackTracker (VmPtr, 0, (Opcode & PUSHPOP_M_64) ? -8 : -4);
+#endif
   return EFI_SUCCESS;
 }
 
@@ -2888,6 +3025,9 @@ ExecutePOPn (
     VmPtr->Gpr[OPERAND1_REGNUM (Operands)] = (INT64) (UINT64) ((UINTN) DataN + Index16);
   }
 
+#ifdef MDE_CPU_ARM
+  return UpdateStackTracker (VmPtr, 1, 0);
+#endif
   return EFI_SUCCESS;
 }
 
@@ -2967,6 +3107,9 @@ ExecutePOP (
     }
   }
 
+#ifdef MDE_CPU_ARM
+  return UpdateStackTracker (VmPtr, 0, (Opcode & PUSHPOP_M_64) ? 8 : 4);
+#endif
   return EFI_SUCCESS;
 }
 
@@ -4298,6 +4441,15 @@ ExecuteDataManip (
       VmWriteMem32 (VmPtr, (UINTN) Op1, (UINT32) Op2);
     }
   } else {
+#ifdef MDE_CPU_ARM
+    //
+    // Track direct register operations on R0
+    //
+    if (OPERAND1_REGNUM (Operands) == 0) {
+      UpdateStackTrackerFromDelta(VmPtr, (UINTN) Op2);
+    }
+#endif
+
     //
     // Storage back to a register. Write back, clearing upper bits (as per
     // the specification) if 32-bit operation.
