@@ -24,6 +24,14 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 #define IS_ALIGNED(addr, size)      !((UINT32) (addr) & (size - 1))
 
 //
+// EBC index pair
+//
+typedef struct {
+  UINT64 NaturalUnits;
+  UINT64 ConstUnits;
+} EBC_INDEX;
+
+//
 // Debug macro
 //
 #define EBCMSG(s) gST->ConOut->OutputString (gST->ConOut, s)
