@@ -34,7 +34,7 @@ typedef struct _EFI_EBC_VM_TEST_PROTOCOL EFI_EBC_VM_TEST_PROTOCOL;
 // VM major/minor version
 //
 #define VM_MAJOR_VERSION  1
-#define VM_MINOR_VERSION  0
+#define VM_MINOR_VERSION  1
 
 //
 // Bits in the VM->StopFlags field

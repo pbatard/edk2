@@ -32,6 +32,7 @@ typedef struct {
   UINT32    Magic;
   UINT32    EbcEntryPoint;
   UINT32    EbcLlEntryPoint;
+  UINT32    EbcCallSignature;
 } EBC_INSTRUCTION_BUFFER;
 #pragma pack()
 
@@ -158,7 +159,7 @@ PushU32 (
   @param  Arg3                  The 3rd argument.
   @param  Arg4                  The 4th argument.
   @param  InstructionBuffer     A pointer to the thunk instruction buffer.
-  @param  Args5_16[]            Array containing arguments #5 to #16.
+  @param  Args5To32[]           Array containing arguments #5 to #16.
 
   @return The value returned by the EBC application we're going to run.
 
@@ -171,7 +172,7 @@ EbcInterpret (
   IN UINTN                  Arg3,
   IN UINTN                  Arg4,
   IN EBC_INSTRUCTION_BUFFER *InstructionBuffer,
-  IN UINTN                  Args5_16[]
+  IN UINTN                  Args5To32[]
   )
 {
   //
@@ -179,11 +180,23 @@ EbcInterpret (
   //
   VM_CONTEXT  VmContext;
   UINTN       Addr;
+  UINT32      Mask;
   EFI_STATUS  Status;
   UINTN       StackIndex;
+  INTN        ArgNumber;
+  BOOLEAN     *SkipArg;
 
   //
-  // Get the EBC entry point
+  // If the call signature is missing (high 16-bits are not set to
+  // EBC_CALL_SIGNATURE), return an error as we aren't able to
+  // properly reconstruct the EBC VM parameter stack.
+  //
+  if ((InstructionBuffer->EbcCallSignature & 0xFFFF0000) != EBC_CALL_SIGNATURE) {
+    return EFI_INCOMPATIBLE_VERSION;
+  }
+
+  //
+  // Get the EBC entry point and signature
   //
   Addr = InstructionBuffer->EbcEntryPoint;
 
@@ -240,25 +253,49 @@ EbcInterpret (
   VmContext.LowStackTop   = (UINTN) VmContext.Gpr[0];
 
   //
-  // For the worst case, assume there are 4 arguments passed in registers, store
-  // them to VM's stack.
+  // Find which 32-bit args need to be skipped
   //
-  PushU32 (&VmContext, (UINT32) Args5_16[11]);
-  PushU32 (&VmContext, (UINT32) Args5_16[10]);
-  PushU32 (&VmContext, (UINT32) Args5_16[9]);
-  PushU32 (&VmContext, (UINT32) Args5_16[8]);
-  PushU32 (&VmContext, (UINT32) Args5_16[7]);
-  PushU32 (&VmContext, (UINT32) Args5_16[6]);
-  PushU32 (&VmContext, (UINT32) Args5_16[5]);
-  PushU32 (&VmContext, (UINT32) Args5_16[4]);
-  PushU32 (&VmContext, (UINT32) Args5_16[3]);
-  PushU32 (&VmContext, (UINT32) Args5_16[2]);
-  PushU32 (&VmContext, (UINT32) Args5_16[1]);
-  PushU32 (&VmContext, (UINT32) Args5_16[0]);
-  PushU32 (&VmContext, (UINT32) Arg4);
+  SkipArg = AllocateZeroPool(16 * sizeof(BOOLEAN));
+  for (ArgNumber = 0, Mask = 1; Mask < 0x10000; Mask <<= 1) {
+    if ((InstructionBuffer->EbcCallSignature & Mask) == Mask) {
+      //
+      // This is a 64 bit arg => check if we are aligned.
+      // If not, then we need to skip one 32-bit arg.
+      //
+      if (ArgNumber % 2 != 0) {
+        SkipArg[ArgNumber / 2] = TRUE;
+        ArgNumber += 1;
+      }
+      ArgNumber += 2;
+    } else {
+      ArgNumber += 1;
+    }
+  }
+  ASSERT(ArgNumber <= 32);
+
+  //
+  // Process the stack arguments. ArgNumber is already set to the max number
+  // of 32 bit values we need to process (including registers) so use that.
+  //
+  for (ArgNumber -= 5; ArgNumber >= 0; ArgNumber--) {
+    if ((ArgNumber % 2 == 0) || (!SkipArg[(ArgNumber + 4) / 2])) {
+      PushU32 (&VmContext, (UINT32) Args5To32[ArgNumber]);
+    }
+  }
+
+  //
+  // For the worst case, assume there are 4 arguments passed in registers,
+  // store them to VM's stack.
+  //
+  if (!SkipArg[1]) {
+    PushU32 (&VmContext, (UINT32) Arg4);
+  }
   PushU32 (&VmContext, (UINT32) Arg3);
-  PushU32 (&VmContext, (UINT32) Arg2);
+  if (!SkipArg[0]) {
+    PushU32 (&VmContext, (UINT32) Arg2);
+  }
   PushU32 (&VmContext, (UINT32) Arg1);
+  FreePool(SkipArg);
 
   //
   // Interpreter assumes 64-bit return address is pushed on the stack.
@@ -472,6 +509,16 @@ EbcCreateThunks (
     InstructionBuffer->EbcLlEntryPoint = (UINT32)EbcLLExecuteEbcImageEntryPoint;
   } else {
     InstructionBuffer->EbcLlEntryPoint = (UINT32)EbcLLEbcInterpret;
+  }
+
+  //
+  // Add the call signature (high 16-bits of Flags) along with the.
+  // EBC_CALL_SIGNATURE marker. A missing marker helps us fault the
+  // EBC call at runtime, if it doesn't have a signature.
+  //
+  if ((Flags & FLAG_THUNK_SIGNATURE) != 0) {
+    InstructionBuffer->EbcCallSignature =
+     (UINT32)(EBC_CALL_SIGNATURE | (Flags >> 16));
   }
 
   //
