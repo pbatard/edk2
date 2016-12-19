@@ -2,6 +2,7 @@
   This module contains EBC support routines that are customized based on
   the target Arm processor.
 
+Copyright (c) 2016, Pete Batard. All rights reserved.<BR>
 Copyright (c) 2016, Linaro, Ltd. All rights reserved.<BR>
 Copyright (c) 2015, The Linux Foundation. All rights reserved.<BR>
 Copyright (c) 2006 - 2014, Intel Corporation. All rights reserved.<BR>
@@ -63,6 +64,69 @@ EbcLLExecuteEbcImageEntryPoint (
   );
 
 /**
+  This function is called to execute an EBC CALLEX instruction.
+  This is a special version of EbcLLCALLEXNative for Arm as we
+  need to pad or align arguments depending on whether they are
+  64-bit or natural.
+
+  @param  CallAddr     The function address.
+  @param  EbcSp        The new EBC stack pointer.
+  @param  FramePtr     The frame pointer.
+  @param  ArgLayout    The layout for up to 32 arguments. 1 means
+                       the argument is 64-bit, 0 means natural.
+
+  @return The unmodified value returned by the native code.
+
+**/
+INT64
+EFIAPI
+EbcLLCALLEXNativeArm (
+  IN UINTN        CallAddr,
+  IN UINTN        EbcSp,
+  IN VOID         *FramePtr,
+  IN UINT16       ArgLayout
+  );
+
+/**
+  Allocate a stack tracker structure and initialize it.
+
+  @param VmPtr         The pointer to current VM context.
+
+  @retval EFI_OUT_OF_RESOURCES  Not enough memory to set the stack tracker.
+  @retval EFI_SUCCESS           The stack tracker was initialized successfully.
+
+**/
+EFI_STATUS
+AllocateStackTracker (
+  IN VM_CONTEXT *VmPtr
+  );
+
+/**
+  Free a stack tracker structure.
+
+  @param VmPtr         The pointer to current VM context.
+**/
+VOID
+FreeStackTracker (
+  IN VM_CONTEXT *VmPtr
+  );
+
+/**
+  Return the argument layout for the current function call, according
+  to the current stack tracking data.
+  The first argument is at bit 0, with the 16th parameter at bit 15,
+  with a bit set to 1 if an argument is 64 bit, 0 otherwise.
+
+  @param VmPtr         The pointer to current VM context.
+
+  @return              A 16 bit argument layout.
+**/
+UINT16
+GetArgLayout (
+  IN VM_CONTEXT *VmPtr
+  );
+
+/**
   Pushes a 32 bit unsigned value to the VM stack.
 
   @param VmPtr  The pointer to current VM context.
@@ -85,7 +149,7 @@ PushU32 (
 
 
 /**
-  Begin executing an EBC image.
+  Begin executing an EBC function call.
 
   This is a thunk function.
 
@@ -93,8 +157,7 @@ PushU32 (
   @param  Arg2                  The 2nd argument.
   @param  Arg3                  The 3rd argument.
   @param  Arg4                  The 4th argument.
-  @param  Arg8                  The 8th argument.
-  @param  EntryPoint            The entrypoint of EBC code.
+  @param  InstructionBuffer     A pointer to the thunk instruction buffer.
   @param  Args5_16[]            Array containing arguments #5 to #16.
 
   @return The value returned by the EBC application we're going to run.
@@ -103,12 +166,12 @@ PushU32 (
 UINT64
 EFIAPI
 EbcInterpret (
-  IN UINTN      Arg1,
-  IN UINTN      Arg2,
-  IN UINTN      Arg3,
-  IN UINTN      Arg4,
-  IN UINTN      EntryPoint,
-  IN UINTN      Args5_16[]
+  IN UINTN                  Arg1,
+  IN UINTN                  Arg2,
+  IN UINTN                  Arg3,
+  IN UINTN                  Arg4,
+  IN EBC_INSTRUCTION_BUFFER *InstructionBuffer,
+  IN UINTN                  Args5_16[]
   )
 {
   //
@@ -122,7 +185,7 @@ EbcInterpret (
   //
   // Get the EBC entry point
   //
-  Addr = EntryPoint;
+  Addr = InstructionBuffer->EbcEntryPoint;
 
   //
   // Now clear out our context
@@ -135,20 +198,28 @@ EbcInterpret (
   VmContext.Ip = (VMIP) Addr;
 
   //
+  // Initialize the stack tracker
+  //
+  Status = AllocateStackTracker(&VmContext);
+  if (EFI_ERROR(Status)) {
+    return Status;
+  }
+
+  //
   // Initialize the stack pointer for the EBC. Get the current system stack
   // pointer and adjust it down by the max needed for the interpreter.
   //
+  Status = GetEBCStack((EFI_HANDLE)(UINTN)-1, &VmContext.StackPool, &StackIndex);
+  if (EFI_ERROR(Status)) {
+    FreeStackTracker(&VmContext);
+    return Status;
+  }
 
   //
   // Adjust the VM's stack pointer down.
   //
-
-  Status = GetEBCStack((EFI_HANDLE)(UINTN)-1, &VmContext.StackPool, &StackIndex);
-  if (EFI_ERROR(Status)) {
-    return Status;
-  }
-  VmContext.StackTop = (UINT8*)VmContext.StackPool + (STACK_REMAIN_SIZE);
-  VmContext.Gpr[0] = (UINT32) ((UINT8*)VmContext.StackPool + STACK_POOL_SIZE);
+  VmContext.StackTop = (UINT8*)VmContext.StackPool + STACK_REMAIN_SIZE;
+  VmContext.Gpr[0] = (UINT64)(UINTN) ((UINT8*)VmContext.StackPool + STACK_POOL_SIZE);
   VmContext.HighStackBottom = (UINTN) VmContext.Gpr[0];
   VmContext.Gpr[0] -= sizeof (UINTN);
 
@@ -227,6 +298,7 @@ EbcInterpret (
   // Return the value in Gpr[7] unless there was an error
   //
   ReturnEBCStack(StackIndex);
+  FreeStackTracker(&VmContext);
   return (UINT64) VmContext.Gpr[7];
 }
 
@@ -280,6 +352,14 @@ ExecuteEbcImageEntryPoint (
   VmContext.Ip = (VMIP) Addr;
 
   //
+  // Initialize the stack tracker
+  //
+  Status = AllocateStackTracker(&VmContext);
+  if (EFI_ERROR(Status)) {
+    return Status;
+  }
+
+  //
   // Initialize the stack pointer for the EBC. Get the current system stack
   // pointer and adjust it down by the max needed for the interpreter.
   //
@@ -287,11 +367,12 @@ ExecuteEbcImageEntryPoint (
   //
   // Allocate stack pool
   //
-  Status = GetEBCStack(ImageHandle, &VmContext.StackPool, &StackIndex);
+  Status = GetEBCStack (ImageHandle, &VmContext.StackPool, &StackIndex);
   if (EFI_ERROR(Status)) {
+    FreeStackTracker(&VmContext);
     return Status;
   }
-  VmContext.StackTop = (UINT8*)VmContext.StackPool + (STACK_REMAIN_SIZE);
+  VmContext.StackTop = (UINT8*)VmContext.StackPool + STACK_REMAIN_SIZE;
   VmContext.Gpr[0] = (UINT64)(UINTN) ((UINT8*)VmContext.StackPool + STACK_POOL_SIZE);
   VmContext.HighStackBottom = (UINTN)VmContext.Gpr[0];
   VmContext.Gpr[0] -= sizeof (UINTN);
@@ -328,6 +409,7 @@ ExecuteEbcImageEntryPoint (
   // Return the value in Gpr[7] unless there was an error
   //
   ReturnEBCStack(StackIndex);
+  FreeStackTracker(&VmContext);
   return (UINT64) VmContext.Gpr[7];
 }
 
@@ -459,7 +541,8 @@ EbcLLCALLEX (
     // stack frame. All we know is that there is an 8 byte gap at the top that
     // we can ignore.
     //
-    VmPtr->Gpr[7] = EbcLLCALLEXNative (FuncAddr, NewStackPointer, FramePtr - 8);
+    VmPtr->Gpr[7] = EbcLLCALLEXNativeArm (FuncAddr, NewStackPointer,
+          &((UINT8*)FramePtr)[-8], GetArgLayout(VmPtr));
 
     //
     // Advance the IP.
@@ -467,4 +550,3 @@ EbcLLCALLEX (
     VmPtr->Ip += Size;
   }
 }
-

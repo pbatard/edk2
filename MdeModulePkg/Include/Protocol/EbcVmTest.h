@@ -111,6 +111,8 @@ typedef struct {
   UINTN             ImageBase;
   VOID              *StackPool;
   VOID              *StackTop;
+  VOID              *StackTracker;          ///< pointer to an optional, opaque and arch-specific
+                                            ///  structure, which may be used to track stack ops.
 } VM_CONTEXT;
 
 /**
