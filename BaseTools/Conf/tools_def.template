@@ -7651,6 +7651,18 @@ RELEASE_RVCTCYGWIN_ARM_CC_FLAGS  = "$(CCPATH_FLAG)" $(ARCHCC_FLAGS) $(PLATFORM_F
 *_*_*_GENFW_FLAGS                  =
 
 ##################
+# GenEbc tool definitions
+##################
+*_*_EBC_GENEBC_PATH                = GenEbcSignature
+*_*_EBC_GENEBC_FLAGS               =
+
+##################
+# PatchEbc tool definitions
+##################
+*_*_EBC_PATCHEBC_PATH              = PatchEbcSignature
+*_*_EBC_PATCHEBC_FLAGS             =
+
+##################
 # Asl Compiler definitions
 ##################
 *_*_*_ASLCC_FLAGS                  = /nologo /c /FIAutoGen.h /TC /Dmain=ReferenceAcpiTable
