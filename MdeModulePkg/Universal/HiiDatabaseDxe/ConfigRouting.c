@@ -5307,7 +5307,7 @@ HiiConfigRoutingRouteConfig (
   EFI_STRING                          ConfigResp;
   UINTN                               Length;
   EFI_STATUS                          Status;
-  EFI_DEVICE_PATH_PROTOCOL            *DevicePath;
+  EFI_DEVICE_PATH_PROTOCOL            *DevicePath = NULL;
   EFI_DEVICE_PATH_PROTOCOL            *TempDevicePath;
   LIST_ENTRY                          *Link;
   HII_DATABASE_RECORD                 *Database;

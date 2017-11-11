@@ -512,7 +512,7 @@ RequiredDriver (
   EFI_STATUS                  Status;
   UINT8                       ClassGuidNum;
   EFI_GUID                    *ClassGuid;
-  EFI_IFR_FORM_SET            *Buffer;
+  EFI_IFR_FORM_SET            *Buffer = NULL;
   UINTN                       BufferSize;
   UINT8                       *Ptr;
   UINTN                       TempSize;

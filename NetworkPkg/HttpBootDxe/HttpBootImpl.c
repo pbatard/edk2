@@ -121,7 +121,7 @@ HttpBootStart (
 {
   UINTN                Index;
   EFI_STATUS           Status;
-  CHAR8                *Uri;
+  CHAR8                *Uri = NULL;
   
 
   if (Private == NULL || FilePath == NULL) {

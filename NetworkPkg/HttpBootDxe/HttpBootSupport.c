@@ -1199,7 +1199,7 @@ HttpBootCheckImageType (
 {
   EFI_STATUS            Status;
   EFI_HTTP_HEADER       *Header;
-  CHAR8                 *FilePath;
+  CHAR8                 *FilePath = NULL;
   CHAR8                 *FilePost;
 
   if (Uri == NULL || UriParser == NULL || ImageType == NULL) {
