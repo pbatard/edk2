@@ -631,7 +631,7 @@ struct _LIST_ENTRY {
 
 #define VA_COPY(Dest, Start)          __va_copy (Dest, Start)
 
-#elif defined(_M_ARM)
+#elif defined(_M_ARM) || defined(_M_ARM64)
 //
 // MSFT ARM variable argument list support.
 //
