@@ -90,6 +90,15 @@ if defined VS140COMNTOOLS (
   )
 )
 
+if defined VS150COMNTOOLS (
+  if not defined VS2017_PREFIX (
+    set "VS2017_PREFIX=%VCToolsInstallDir%"
+  )
+  if not defined WINSDK10_PREFIX (
+    set "WINSDK10_PREFIX=%WindowsSdkVerBinPath%"
+  )
+)
+
 if not defined WINDDK3790_PREFIX (
   set WINDDK3790_PREFIX=C:\WINDDK\3790.1830\bin\
 )
