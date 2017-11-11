@@ -631,6 +631,21 @@ struct _LIST_ENTRY {
 
 #define VA_COPY(Dest, Start)          __va_copy (Dest, Start)
 
+#elif defined(_M_ARM)
+//
+// MSFT ARM variable argument list support.
+//
+
+// Standard Visual Studio header
+#include <stdarg.h>
+
+typedef char* VA_LIST;
+
+#define VA_START(ap, num)             va_start(ap, num)
+#define VA_ARG(ap, type)              va_arg(ap, type)
+#define VA_END(ap)                    va_end(ap)
+#define VA_COPY(dest, src)            va_copy(dest, src)
+
 #elif defined(__GNUC__)
 
 #if defined(MDE_CPU_X64) && !defined(NO_MSABI_VA_FUNCS)
